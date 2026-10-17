@@ -30,6 +30,11 @@ export default function App() {
     zeroToSixtySec: null,
     pitchDeg: 0,
     rollDeg: 0,
+    isUpsideDown: false,
+    isUprightReady: true,
+    lateralOffsetMeters: 0,
+    isOnRunwayCorridor: true,
+    landedOffRoad: false,
     barrelRollsCount: 0,
     suctionG: 0,
     gForce: 1.0,
@@ -46,6 +51,9 @@ export default function App() {
   const [cameraMode, setCameraMode] = useState<CameraMode>('CHASE');
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playerTag, setPlayerTag] = useState<string>(dailyChallengeManager.getPlayerTag());
+
+  // Top-Bar Zen View / Studio Drawer State (defaults to false = unobstructed Zen View for mobile thumb controls!)
+  const [isStudioOpen, setIsStudioOpen] = useState<boolean>(false);
 
   // Modals
   const [isPrizeModalOpen, setIsPrizeModalOpen] = useState<boolean>(false);
@@ -77,6 +85,8 @@ export default function App() {
     pitchDown: false,
     rollLeft: false,
     rollRight: false,
+    analogX: 0,
+    analogY: 0,
   });
 
   // Tournament Reset Countdown (updates every second)
@@ -153,10 +163,12 @@ export default function App() {
         inputStateRef={inputStateRef}
       />
 
-      {/* Heads-Up Display Telemetry & Touch Controls */}
+      {/* Mobile-First Heads-Up Telemetry, Virtual Analog Thumbstick & Right Pedals */}
       <HUD
         telemetry={telemetry}
         timeRemainingStr={timeRemainingStr}
+        isStudioOpen={isStudioOpen}
+        onToggleStudio={() => setIsStudioOpen((prev) => !prev)}
         onOpenPrizeModal={() => setIsPrizeModalOpen(true)}
         onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
         onOpenGuide={() => setIsGuideOpen(true)}
@@ -164,8 +176,10 @@ export default function App() {
         onReset={handleResetRun}
       />
 
-      {/* Collapsible Ergonomic Bottom Control Dock (Three.js Guidelines: zero central viewport occlusion) */}
+      {/* Top-Bar Toggled Roadster Studio & Camera Drawer (Completely unmounted in Zen View!) */}
       <BottomControlDock
+        isOpen={isStudioOpen}
+        onClose={() => setIsStudioOpen(false)}
         activeColor={activeColor}
         onColorChange={setActiveColor}
         hasSpaceXPackage={hasSpaceXPackage}
@@ -205,6 +219,7 @@ export default function App() {
         onClose={() => setIsResultModalOpen(false)}
         distance={lastResult.distance}
         grade={lastResult.grade}
+        landedOffRoad={telemetry.landedOffRoad}
         speed={lastResult.speed}
         rank={lastResult.rank}
         isDailyWinner={lastResult.isDailyWinner}

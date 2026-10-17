@@ -1,27 +1,30 @@
 /**
- * Bottom Control Dock Component
- * Built in accordance with Three.js skill layout constitution:
- * Single consolidated bottom dock, collapsible, zero viewport occlusion
+ * Roadster Studio & Camera Drawer Component
+ * Conforms to the approved Top-Bar Zen View design:
+ * - When closed (Zen View active), completely unmounts/hides off-screen (0px bottom footprint)
+ *   so the mobile Virtual Thumbstick and Right Pedals have 100% unobstructed thumb space!
+ * - Controlled from the sleek Top Bar "Studio / Cams" button or the close button inside the drawer.
  */
 import React, { useState } from 'react';
 import {
-  ChevronDown,
-  ChevronUp,
   Palette,
   Rocket,
   Camera,
   RotateCcw,
   Volume2,
   VolumeX,
-  Gauge,
   Trophy,
   DollarSign,
   HelpCircle,
+  X,
+  EyeOff,
 } from 'lucide-react';
 import { ROADSTER_COLORS } from '../game/roadsterModel';
 import { CameraMode } from '../game/GameCanvas';
 
 interface BottomControlDockProps {
+  isOpen: boolean;
+  onClose: () => void;
   activeColor: string;
   onColorChange: (colorHex: string) => void;
   hasSpaceXPackage: boolean;
@@ -37,6 +40,8 @@ interface BottomControlDockProps {
 }
 
 export const BottomControlDock: React.FC<BottomControlDockProps> = ({
+  isOpen,
+  onClose,
   activeColor,
   onColorChange,
   hasSpaceXPackage,
@@ -50,51 +55,28 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
   onOpenLeaderboard,
   onOpenGuide,
 }) => {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [activeTab, setActiveTab] = useState<'garage' | 'cameras' | 'actions'>('garage');
+  const [activeTab, setActiveTab] = useState<'garage' | 'cameras'>('garage');
+
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <div
-      className="fixed z-30 transition-transform duration-300 ease-out flex flex-col items-center"
-      style={{
-        bottom: '20px',
-        left: '50%',
-        transform: `translateX(-50%) translateY(${isCollapsed ? 'calc(100% - 34px)' : '0'})`,
-        maxWidth: 'min(940px, 94vw)',
-        width: '100%',
-      }}
+      className="fixed z-40 left-1/2 -translate-x-1/2 top-14 sm:top-16 w-[min(860px,94vw)] transition-all duration-200 animate-in fade-in slide-in-from-top-2"
     >
-      {/* Collapse / Expand Toggle Tab */}
-      <button
-        onClick={() => setIsCollapsed(!isCollapsed)}
-        className="px-4 py-1.5 bg-neutral-900/90 hover:bg-neutral-800 text-neutral-300 text-xs font-semibold rounded-t-xl border-t border-x border-neutral-700/80 shadow-lg flex items-center gap-1.5 transition-colors cursor-pointer"
-        aria-label={isCollapsed ? 'Expand Control Dock' : 'Collapse Control Dock'}
-      >
-        {isCollapsed ? (
-          <>
-            <ChevronUp className="w-3.5 h-3.5 text-red-400" />
-            <span>Show Roadster Controls</span>
-          </>
-        ) : (
-          <>
-            <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
-            <span>Hide Controls (Zen View)</span>
-          </>
-        )}
-      </button>
-
-      {/* Main Glassmorphic Dock Container (solid rgba without backdrop-filter to prevent stall) */}
-      <div className="w-full bg-neutral-950/95 border border-neutral-800/90 rounded-2xl p-3 shadow-2xl shadow-black/80 flex flex-col gap-2.5">
-        {/* Top Mini Navigation Bar inside the dock */}
-        <div className="flex items-center justify-between border-b border-neutral-800/80 pb-2">
+      {/* Floating Studio & Camera Drawer */}
+      <div className="w-full bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-2xl p-3.5 sm:p-4 shadow-2xl shadow-black/90 flex flex-col gap-3">
+        {/* Top Navigation Bar inside the drawer */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800/80 pb-2.5">
           {/* Sub-tabs */}
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={() => setActiveTab('garage')}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'garage'
-                  ? 'bg-red-600 text-white'
-                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/60'
+                  ? 'bg-red-600 text-white shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/70'
               }`}
             >
               <Palette className="w-3.5 h-3.5" />
@@ -102,10 +84,10 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
             </button>
             <button
               onClick={() => setActiveTab('cameras')}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'cameras'
-                  ? 'bg-red-600 text-white'
-                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/60'
+                  ? 'bg-red-600 text-white shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/70'
               }`}
             >
               <Camera className="w-3.5 h-3.5" />
@@ -113,61 +95,83 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
             </button>
           </div>
 
-          {/* Quick Utility Shortcuts */}
+          {/* Utility Shortcuts + Zen View Close */}
           <div className="flex items-center gap-1.5">
             <button
-              onClick={onOpenPrizeModal}
-              className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors"
+              onClick={() => {
+                onClose();
+                onOpenPrizeModal();
+              }}
+              className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <DollarSign className="w-3.5 h-3.5 text-amber-400" />
-              <span>$10 Challenge</span>
+              <span className="hidden xs:inline">$10 Prize</span>
             </button>
 
             <button
-              onClick={onOpenLeaderboard}
-              className="px-2.5 py-1 bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
+              onClick={() => {
+                onClose();
+                onOpenLeaderboard();
+              }}
+              className="px-2.5 py-1.5 bg-neutral-800/80 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Trophy className="w-3.5 h-3.5 text-amber-400" />
-              <span>Daily Board</span>
+              <span className="hidden sm:inline">Leaderboard</span>
             </button>
 
             <button
-              onClick={onOpenGuide}
-              className="p-1.5 bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300 rounded-lg transition-colors"
+              onClick={() => {
+                onClose();
+                onOpenGuide();
+              }}
+              className="p-2 bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300 rounded-xl transition-colors cursor-pointer"
               title="How to Play"
             >
-              <HelpCircle className="w-3.5 h-3.5" />
+              <HelpCircle className="w-4 h-4" />
             </button>
 
             <button
               onClick={onToggleMute}
-              className={`p-1.5 rounded-lg transition-colors ${
+              className={`p-2 rounded-xl transition-colors cursor-pointer ${
                 isMuted
                   ? 'bg-red-950 text-red-400 border border-red-800'
                   : 'bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300'
               }`}
               title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
             >
-              {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
 
             <button
-              onClick={onReset}
-              className="px-3 py-1 bg-red-700 hover:bg-red-600 font-bold text-xs text-white rounded-lg flex items-center gap-1.5 shadow transition-colors"
+              onClick={() => {
+                onReset();
+                onClose();
+              }}
+              className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 font-bold text-xs text-white rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <RotateCcw className="w-3 h-3" />
-              <span>Restart [R]</span>
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Restart</span>
+            </button>
+
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="Enter Zen View"
+            >
+              <EyeOff className="w-3.5 h-3.5" />
+              <span>Zen View</span>
+              <X className="w-3.5 h-3.5 ml-0.5 opacity-70" />
             </button>
           </div>
         </div>
 
         {/* Tab 1: Roadster Customizer & SpaceX Package */}
         {activeTab === 'garage' && (
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-0.5">
             {/* Color Swatches */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-neutral-400 font-semibold flex items-center gap-1">
-                Paint:
+            <div className="flex items-center gap-2.5">
+              <span className="text-xs text-neutral-400 font-semibold whitespace-nowrap">
+                Finish:
               </span>
               <div className="flex items-center gap-2">
                 {ROADSTER_COLORS.map((col) => {
@@ -176,10 +180,10 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
                     <button
                       key={col.name}
                       onClick={() => onColorChange(col.hex)}
-                      className={`group relative w-7 h-7 rounded-full border-2 transition-transform ${
+                      className={`group relative w-8 h-8 rounded-full border-2 transition-transform cursor-pointer ${
                         isSelected
                           ? 'border-white scale-110 shadow-md ring-2 ring-red-500'
-                          : 'border-neutral-600 hover:scale-105 opacity-80 hover:opacity-100'
+                          : 'border-neutral-600 hover:scale-105 opacity-85 hover:opacity-100'
                       }`}
                       style={{ backgroundColor: col.hex }}
                       title={col.name}
@@ -192,20 +196,20 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
             {/* SpaceX Package Switch */}
             <button
               onClick={onToggleSpaceX}
-              className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-2 transition-all ${
+              className={`px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 hasSpaceXPackage
                   ? 'bg-cyan-950/60 border-cyan-400/80 text-cyan-300 shadow-md shadow-cyan-900/30'
                   : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-white'
               }`}
             >
-              <Rocket className={`w-3.5 h-3.5 ${hasSpaceXPackage ? 'text-cyan-400' : 'text-neutral-500'}`} />
-              <span>SpaceX Cold-Gas Thruster Package</span>
+              <Rocket className={`w-4 h-4 ${hasSpaceXPackage ? 'text-cyan-400' : 'text-neutral-500'}`} />
+              <span>SpaceX 10-CGT Package</span>
               <span
-                className={`text-[10px] uppercase px-1.5 py-0.5 rounded ${
+                className={`text-[10px] uppercase px-2 py-0.5 rounded font-mono ${
                   hasSpaceXPackage ? 'bg-cyan-400 text-black font-extrabold' : 'bg-neutral-800 text-neutral-400'
                 }`}
               >
-                {hasSpaceXPackage ? 'Active' : 'Off'}
+                {hasSpaceXPackage ? 'ON (0.55s)' : 'OFF (1.6s)'}
               </span>
             </button>
           </div>
@@ -213,26 +217,31 @@ export const BottomControlDock: React.FC<BottomControlDockProps> = ({
 
         {/* Tab 2: Cameras */}
         {activeTab === 'cameras' && (
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <span className="text-xs text-neutral-400 font-semibold">Camera Mode:</span>
+          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            <span className="text-xs text-neutral-400 font-semibold mr-1 whitespace-nowrap">
+              Camera Angle:
+            </span>
             {(['CHASE', 'SHOWROOM', 'COCKPIT', 'CINEMATIC', 'DRONE'] as CameraMode[]).map((mode) => (
               <button
                 key={mode}
-                onClick={() => onCameraChange(mode)}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
+                onClick={() => {
+                  onCameraChange(mode);
+                  onClose();
+                }}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   cameraMode === mode
-                    ? 'bg-neutral-100 text-neutral-950 font-bold'
-                    : 'bg-neutral-900 text-neutral-400 hover:text-white hover:bg-neutral-800'
+                    ? 'bg-neutral-100 text-neutral-950 shadow'
+                    : 'bg-neutral-900 text-neutral-400 hover:text-white hover:bg-neutral-800 border border-neutral-800'
                 }`}
               >
                 {mode === 'CHASE'
                   ? 'Chase 3rd'
                   : mode === 'SHOWROOM'
-                  ? '360° Car Inspect'
+                  ? '360° Inspect'
                   : mode === 'COCKPIT'
                   ? 'Cockpit FPV'
                   : mode === 'CINEMATIC'
-                  ? 'Cinematic Side'
+                  ? 'Broadcast Side'
                   : 'Drone Top'}
               </button>
             ))}

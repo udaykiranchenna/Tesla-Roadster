@@ -3,7 +3,8 @@
  * Generates volumetric billowing smoke trails from tire contact patches and thruster exhaust:
  * - High G-force cornering / lateral drift friction smoke
  * - Sudden 10,000-PSI Cold-Gas Thruster activation & 0.55s RWD launch burnout clouds
- * - 2.3G Curved Wall-Climb friction trails & high-speed touchdown tire scrub smoke
+ * - 2.4G Inverted C-Ramp Wall-Climb & Upside-Down Overhang friction trails
+ * - High-speed touchdown tire scrub smoke
  * Zero-GC pooled particle buffer with per-particle expansion, rotation, and alpha fade
  */
 import * as THREE from 'three';
@@ -38,6 +39,7 @@ export class TireSmokeParticleSystem {
   private readonly _wheelLocal = new THREE.Vector3();
   private readonly _wheelWorld = new THREE.Vector3();
   private readonly _normalOffset = new THREE.Vector3();
+  private readonly _exhaustDir = new THREE.Vector3();
 
   constructor() {
     this.positions = new Float32Array(MAX_PARTICLES * 3);
@@ -198,11 +200,11 @@ export class TireSmokeParticleSystem {
   }
 
   /**
-   * Spawns tire friction smoke and sudden thruster ground clouds around the Roadster
+   * Spawns tire friction smoke and sudden thruster clouds around the Roadster in full 3D orientation
    */
   public emitFromRoadster(params: {
     carPosition: THREE.Vector3;
-    carRotation: THREE.Euler;
+    carQuaternion: THREE.Quaternion;
     surfaceNormal: THREE.Vector3;
     speedMph: number;
     lateralG: number;
@@ -213,7 +215,7 @@ export class TireSmokeParticleSystem {
   }) {
     const {
       carPosition,
-      carRotation,
+      carQuaternion,
       surfaceNormal,
       speedMph,
       lateralG,
@@ -223,23 +225,25 @@ export class TireSmokeParticleSystem {
       touchdownBurst,
     } = params;
 
-    // 1. High G-Force Cornering / Drift / Wall-Climb Friction Tire Smoke
+    //Rear exhaust vector in world space (local -Z of the car)
+    this._exhaustDir.set(0, 0, -1).applyQuaternion(carQuaternion);
+
+    // 1. High G-Force Cornering / Drift / C-Ramp Wall-Climb Friction Tire Smoke
     const highGCornering = isOnGroundOrWall && (lateralG > 0.65 || longitudinalG > 1.85) && speedMph > 15;
     const isBurnoutLaunch = isOnGroundOrWall && speedMph < 95 && longitudinalG > 1.6;
 
     if (highGCornering || isBurnoutLaunch || touchdownBurst > 0.1) {
-      // Rear RWD tires (+ front tires during high lateral G cornering or touchdown)
       const tireOffsets =
         lateralG > 0.8 || touchdownBurst > 0.1
           ? [
-              { x: 0.94, y: -0.26, z: -1.30 },  // Rear Left
-              { x: -0.94, y: -0.26, z: -1.30 }, // Rear Right
-              { x: 0.91, y: -0.26, z: 1.35 },   // Front Left
-              { x: -0.91, y: -0.26, z: 1.35 },  // Front Right
+              { x: 0.94, y: 0.06, z: -1.30 },  // Rear Left
+              { x: -0.94, y: 0.06, z: -1.30 }, // Rear Right
+              { x: 0.91, y: 0.06, z: 1.35 },   // Front Left
+              { x: -0.91, y: 0.06, z: 1.35 },  // Front Right
             ]
           : [
-              { x: 0.94, y: -0.26, z: -1.30 },  // Rear Left RWD
-              { x: -0.94, y: -0.26, z: -1.30 }, // Rear Right RWD
+              { x: 0.94, y: 0.06, z: -1.30 },  // Rear Left RWD
+              { x: -0.94, y: 0.06, z: -1.30 }, // Rear Right RWD
             ];
 
       const intensity = Math.min(
@@ -260,10 +264,10 @@ export class TireSmokeParticleSystem {
             off.y,
             off.z + (Math.random() - 0.5) * 0.25
           );
-          this._wheelWorld.copy(this._wheelLocal).applyEuler(carRotation).add(carPosition);
+          this._wheelWorld.copy(this._wheelLocal).applyQuaternion(carQuaternion).add(carPosition);
 
-          // Billow outward & along surface normal
-          this._normalOffset.copy(surfaceNormal).multiplyScalar(1.2 + Math.random() * 1.8);
+          // Billow outward along surface normal & rear exhaust direction
+          this._normalOffset.copy(surfaceNormal).multiplyScalar(1.1 + Math.random() * 1.6);
           const lateralSpread = (off.x > 0 ? 1 : -1) * (1.2 + lateralG * 1.5 + Math.random() * 1.4);
 
           this.spawnPuff(
@@ -271,8 +275,8 @@ export class TireSmokeParticleSystem {
             this._wheelWorld.y,
             this._wheelWorld.z,
             this._normalOffset.x + lateralSpread,
-            this._normalOffset.y + 0.8 + Math.random() * 1.2,
-            this._normalOffset.z - 2.5 - Math.random() * 3.0,
+            this._normalOffset.y + this._exhaustDir.y * 2.5,
+            this._normalOffset.z + this._exhaustDir.z * (2.5 + Math.random() * 3.0),
             0.65 + intensity * 0.35,
             3.2 + intensity * 2.6,
             0.65 + Math.random() * 0.45,
@@ -285,25 +289,26 @@ export class TireSmokeParticleSystem {
       });
     }
 
-    // 2. Sudden 10,000-PSI Cold-Gas Thruster Activation & Cryo-Nitrogen Ground Plume (Screenshot 4!)
+    // 2. Sudden 10,000-PSI Cold-Gas Thruster Activation & Cryo-Nitrogen Ground Plume (Screenshot 4 & 8!)
     if (thrusterBurstIntensity > 0.05) {
       const burstCount = thrusterBurstIntensity > 0.65 ? 5 : 3;
       for (let i = 0; i < burstCount; i++) {
         const side = i % 2 === 0 ? 1 : -1;
         this._wheelLocal.set(
-          side * (0.45 + Math.random() * 0.55),
-          -0.18 + (Math.random() - 0.5) * 0.15,
+          side * (0.35 + Math.random() * 0.55),
+          0.25 + (Math.random() - 0.5) * 0.15,
           -2.25 - Math.random() * 0.4
         );
-        this._wheelWorld.copy(this._wheelLocal).applyEuler(carRotation).add(carPosition);
+        this._wheelWorld.copy(this._wheelLocal).applyQuaternion(carQuaternion).add(carPosition);
 
+        const exhaustSpeed = 8.0 + Math.random() * 6.0 * thrusterBurstIntensity;
         this.spawnPuff(
           this._wheelWorld.x,
           this._wheelWorld.y,
           this._wheelWorld.z,
-          side * (2.2 + Math.random() * 3.5 * thrusterBurstIntensity),
-          (isOnGroundOrWall ? 1.4 : 0.4) + (Math.random() - 0.3) * 2.2,
-          -8.0 - Math.random() * 6.0 * thrusterBurstIntensity,
+          side * (2.0 + Math.random() * 3.2 * thrusterBurstIntensity) + this._exhaustDir.x * exhaustSpeed,
+          this._exhaustDir.y * exhaustSpeed + (Math.random() - 0.4) * 2.0,
+          this._exhaustDir.z * exhaustSpeed,
           0.75 + thrusterBurstIntensity * 0.45,
           4.2 + thrusterBurstIntensity * 2.8,
           0.55 + Math.random() * 0.4,

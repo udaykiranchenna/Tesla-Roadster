@@ -1,17 +1,17 @@
 /**
- * Physics Engine for the New Tesla Roadster (Lars Moravy Engineering Specs)
+ * Physics Engine for the New Tesla Roadster on the Inverted C-Ramp (Lars Moravy Engineering Specs)
  * Models:
  * 1. Powertrain: Dual RWD Electric Motors (>1 MW / 1,050 kW, 1,400 Nm torque, 8.4:1 planetary reduction, 1,680 kg mass)
  *    - Rocket Version (SpaceX Package ON): 0-60 mph in 0.55 seconds!
  *    - Standard Performance (SpaceX Package OFF): 0-60 mph in 1.60 seconds!
  * 2. 'Sucker' Aerodynamic System:
- *    - 4 Fans + 4 Independent Retractable Skirts pulling >2.0G active suction downforce
- *    - High-Flow Mode (200+ mph): Front & rear skirts open automatically to minimize drag
- * 3. SpaceX Cold-Gas Thruster (CGT) System:
- *    - 600-Liter Compressed Nitrogen Tank at 10,000 PSI
- *    - 10 CGTs (4 Rear Propulsion + 6 Flight/Hover/Independent Yaw & Roll Control)
- * 4. Double-Wishbone Rocker-Arm Suspension with Spool-Valve Adaptive Dampers
- * 5. High-G Cornering & Sudden Thruster Activation Tire Smoke Particle Integration
+ *    - 4 Fans + 4 Independent Retractable Skirts pulling >2.4G active suction downforce to cling upside-down at 170°!
+ *    - High-Flow Mode (200+ mph on flat ground): Front & rear skirts open automatically to minimize drag
+ * 3. Full Player-Controlled Mid-Air Flight, Roll-Flip & On-Road Touchdown:
+ *    - Launches upside-down (180° roll) off the 170° C-Ramp overhang with lateral drift momentum
+ *    - Player controls lateral SpaceX CGT steering (to stay aligned with the 34m asphalt runway),
+ *      manual roll flip (180° upside-down -> 0° upright), and nose pitch attitude!
+ *    - Landing off the road (|X| > 16.5m) or upside-down triggers a crash penalty; landing upright on the road earns up to 1.30x!
  */
 import * as THREE from 'three';
 import { TrackBuilder } from './trackBuilder';
@@ -41,8 +41,13 @@ export interface Telemetry {
   motorPowerKw: number;         // Up to 1,050+ kW (>1 Megawatt RWD)
   skirtMode: 'SEALED_2G' | 'HIGH_FLOW_200MPH' | 'FLIGHT';
   zeroToSixtySec: number | null; // Measured 0-60 mph rollout time (0.55s Rocket / 1.60s Standard)
-  pitchDeg: number;
-  rollDeg: number;
+  pitchDeg: number;             // On C-Ramp: 0° -> 90° -> 170° (PITCH: 170 DEG upside-down!); In Air: nose pitch
+  rollDeg: number;              // Normalized -180° to +180° (0° = upright, ±180° = upside-down)
+  isUpsideDown: boolean;        // True when gliding upside-down on the C-ramp overhang or inverted in mid-air
+  isUprightReady: boolean;      // True when rolled within ±28° of upright for a safe 4-wheel touchdown
+  lateralOffsetMeters: number;  // Signed X offset in meters from runway centerline (runway is -16.5m to +16.5m)
+  isOnRunwayCorridor: boolean;  // True when positioned over the asphalt landing runway (|X| <= 16.5m)
+  landedOffRoad: boolean;       // True if touchdown occurred outside the asphalt runway bounds
   barrelRollsCount: number;
   suctionG: number;
   gForce: number;
@@ -63,6 +68,8 @@ export interface PlayerInput {
   pitchDown: boolean;
   rollLeft: boolean;
   rollRight: boolean;
+  analogX: number; // Continuous -1 (left) to +1 (right) from Virtual Thumbstick
+  analogY: number; // Continuous -1 (push up / nose down) to +1 (pull down / nose up) from Virtual Thumbstick
 }
 
 export class PhysicsEngine {
@@ -72,12 +79,24 @@ export class PhysicsEngine {
   public readonly massKg: number = 1680;
   public readonly gearRatio: number = 8.4;
   public readonly maxMotorTorqueNm: number = 1400;
+  public readonly runwayHalfWidth: number = 16.5;
   public hasSpaceXPackage: boolean = true;
 
-  // Position, Velocity, Orientation
-  public position: THREE.Vector3 = new THREE.Vector3(0, 0.35, -25);
+  // Arc-length along Approach + C-Ramp (0 to totalTrackLength)
+  public sDistance: number = 8.0;
+  public forwardSpeed: number = 0; // m/s along the C-ramp tangent
+  public rampProgress: number = 0; // 0..1 along the curved C-section + overhang
+  public cRampPitchDeg: number = 0; // 0° -> 90° -> 170°
+  public isUpsideDown: boolean = false;
+  public landedOffRoad: boolean = false;
+
+  // 3D World Position, Velocity & Gimbal-Lock-Free Quaternion Orientation
+  public position: THREE.Vector3 = new THREE.Vector3(0, 0.02, 122);
   public velocity: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
-  public rotation: THREE.Euler = new THREE.Euler(0, 0, 0, 'YXZ');
+  public rotation: THREE.Euler = new THREE.Euler(0, Math.PI, 0, 'YXZ');
+  public quaternion: THREE.Quaternion = new THREE.Quaternion();
+  public forwardDir: THREE.Vector3 = new THREE.Vector3(0, 0, -1);
+  public upDir: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
 
   // Dynamics & Telemetry State
   public speedMph: number = 0;
@@ -92,6 +111,7 @@ export class PhysicsEngine {
   public suspensionCompression: number = 0;
 
   // Tactile Steering, Body Roll, Thruster Burst & Smoke State
+  public lateralOffsetX: number = 0;
   public lateralVelocityX: number = 0;
   public steerAngleRad: number = 0;
   public chassisRollRad: number = 0;
@@ -101,16 +121,26 @@ export class PhysicsEngine {
   private wasBoostingLastFrame: boolean = false;
   private currentSurfaceNormal: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
 
-  public countdown: number = 2.4;
-  public jumpStartDistance: number = 380;
+  public countdown: number = 2.2;
+  public jumpStartZ: number = 17.1;
   public finalDistance: number = 0;
   public landingGrade: LandingGrade | null = null;
   public rolloutBonus: number = 0;
 
-  // Barrel Roll & Yaw Control Tracking
+  // Airborne Manual Flip, Roll & Pitch State
+  public airElapsed: number = 0;
+  public airPitchRad: number = 0;
+  public airYawRad: number = 0;
   public barrelRollsCount: number = 0;
-  private cumulativeRollRad: number = 0;
-  private targetAutoRollRad: number = Math.PI * 2;
+  private cumulativeRollRad: number = Math.PI; // Starts at 180° (upside-down) at C-ramp launch lip!
+  private rollAngularVel: number = 0;
+  private assistTargetRollRad: number | null = null;
+
+  // Reusable math helpers (Zero-GC)
+  private readonly _rotMatrix = new THREE.Matrix4();
+  private readonly _xAxis = new THREE.Vector3();
+  private readonly _yAxis = new THREE.Vector3();
+  private readonly _zAxis = new THREE.Vector3();
 
   private track: TrackBuilder;
   private carModel: TeslaRoadsterModel;
@@ -136,23 +166,87 @@ export class PhysicsEngine {
     this.onScoreCallback = callback;
   }
 
+  /**
+   * Fires SpaceX Lateral Roll Cold-Gas Thrusters:
+   * - If the car is currently upside-down or tilted in mid-air, locks onto the nearest upright (0°/360°) angle to flip right-side-up!
+   * - If already upright, executes a full 360° bonus barrel roll!
+   */
   public triggerBarrelRoll() {
-    if (this.phase === 'AIRBORNE' && this.hasSpaceXPackage && this.boostFuel > 2) {
-      this.targetAutoRollRad += Math.PI * 2;
-      this.barrelRollsCount += 1;
+    if (this.phase === 'AIRBORNE' && this.boostFuel > 2) {
+      const normRoll = this.getNormalizedRollDeg();
+      const nearestUprightRad =
+        Math.round(this.cumulativeRollRad / (Math.PI * 2)) * (Math.PI * 2) || Math.PI * 2;
+
+      if (Math.abs(normRoll) > 30) {
+        // Flip from upside-down / tilted directly to upright!
+        this.assistTargetRollRad = nearestUprightRad;
+        if (this.barrelRollsCount < 1) this.barrelRollsCount = 1;
+      } else {
+        // Already upright -> perform a full 360° bonus barrel roll!
+        this.assistTargetRollRad = nearestUprightRad + Math.PI * 2;
+        this.barrelRollsCount += 1;
+        this.velocity.z += 10;
+        this.velocity.y += 4.0;
+      }
+
       this.boostFuel = Math.max(0, this.boostFuel - 4);
       this.thrusterBurstIntensity = 1.0;
-      this.velocity.z += 12;
-      this.velocity.y += 4.5;
       soundEngine.playLaunchRampWhoosh();
     }
   }
 
+  private getNormalizedRollDeg(): number {
+    const raw = ((this.cumulativeRollRad * 180) / Math.PI) % 360;
+    return raw > 180 ? raw - 360 : raw < -180 ? raw + 360 : raw;
+  }
+
+  /**
+   * Combines continuous Virtual Thumbstick analogX (-1..1) with keyboard A/D / Left/Right
+   */
+  private getEffectiveSteerX(input: PlayerInput): number {
+    if (Math.abs(input.analogX) > 0.04) {
+      return THREE.MathUtils.clamp(input.analogX, -1, 1);
+    }
+    let k = 0;
+    if (input.steerLeft || input.rollLeft) k -= 1;
+    if (input.steerRight || input.rollRight) k += 1;
+    return k;
+  }
+
+  /**
+   * Combines continuous Virtual Thumbstick analogY (-1..1) with keyboard W/S / Up/Down
+   */
+  private getEffectivePitchY(input: PlayerInput): number {
+    if (Math.abs(input.analogY) > 0.04) {
+      return THREE.MathUtils.clamp(input.analogY, -1, 1);
+    }
+    let k = 0;
+    if (input.pitchDown) k -= 1;
+    if (input.pitchUp) k += 1;
+    return k;
+  }
+
   public reset() {
     this.phase = 'STAGING';
-    this.position.set(0, 0.35, -25);
+    this.sDistance = 8.0; // Starts at Z = 122m facing -Z straight into the giant C-Ramp!
+    this.forwardSpeed = 0;
+    this.rampProgress = 0;
+    this.cRampPitchDeg = 0;
+    this.isUpsideDown = false;
+    this.landedOffRoad = false;
+
+    const startPt = this.track.getPointAtArcLength(this.sDistance);
+    this.position.copy(startPt.position);
+    this.position.y = 0.02;
     this.velocity.set(0, 0, 0);
-    this.rotation.set(0, 0, 0, 'YXZ');
+    this.forwardDir.copy(startPt.forward);
+    this.upDir.copy(startPt.up);
+
+    this._xAxis.crossVectors(this.upDir, this.forwardDir).normalize();
+    this._rotMatrix.makeBasis(this._xAxis, this.upDir, this.forwardDir);
+    this.quaternion.setFromRotationMatrix(this._rotMatrix);
+    this.rotation.setFromQuaternion(this.quaternion, 'YXZ');
+
     this.speedMph = 0;
     this.gForce = 1.0;
     this.lateralG = 0.0;
@@ -163,6 +257,7 @@ export class PhysicsEngine {
     this.elapsedRunTime = 0;
     this.zeroToSixtySec = null;
     this.suspensionCompression = 0;
+    this.lateralOffsetX = 0;
     this.lateralVelocityX = 0;
     this.steerAngleRad = 0;
     this.chassisRollRad = 0;
@@ -172,14 +267,18 @@ export class PhysicsEngine {
     this.wasBoostingLastFrame = false;
     this.currentSurfaceNormal.set(0, 1, 0);
 
-    this.countdown = 2.4;
-    this.jumpStartDistance = this.track.rampSpecs.endZ;
+    this.countdown = 2.2;
+    this.jumpStartZ = this.track.rampSpecs.launchLipZ;
     this.finalDistance = 0;
     this.landingGrade = null;
     this.rolloutBonus = 0;
+    this.airElapsed = 0;
+    this.airPitchRad = 0;
+    this.airYawRad = 0;
     this.barrelRollsCount = 0;
-    this.cumulativeRollRad = 0;
-    this.targetAutoRollRad = Math.PI * 2;
+    this.cumulativeRollRad = Math.PI;
+    this.rollAngularVel = 0;
+    this.assistTargetRollRad = null;
 
     this.track.distanceGates.forEach((g) => (g.passed = false));
     this.track.setCountdownStage(0);
@@ -196,7 +295,7 @@ export class PhysicsEngine {
     // Detect sudden thruster activation (rising edge of boost) for explosive cryo-nitrogen & tire smoke burst!
     const isBoostPressed = this.hasSpaceXPackage && input.boost && this.boostFuel > 0;
     if (isBoostPressed && !this.wasBoostingLastFrame) {
-      this.thrusterBurstIntensity = 1.0; // Sudden 10,000 PSI CGT ignition spike!
+      this.thrusterBurstIntensity = 1.0;
       soundEngine.playLaunchRampWhoosh();
     } else if (isBoostPressed) {
       this.thrusterBurstIntensity = THREE.MathUtils.damp(this.thrusterBurstIntensity, 0.72, 4, delta);
@@ -271,7 +370,7 @@ export class PhysicsEngine {
 
       this.smokeSystem.emitFromRoadster({
         carPosition: this.position,
-        carRotation: this.rotation,
+        carQuaternion: this.quaternion,
         surfaceNormal: this.currentSurfaceNormal,
         speedMph: this.speedMph,
         lateralG: this.lateralG,
@@ -292,13 +391,13 @@ export class PhysicsEngine {
     this.countdown -= dt;
     this.currentSurfaceNormal.set(0, 1, 0);
 
-    // Pre-stage RWD burnout smoke if holding gas + brake or boost during countdown!
+    // Pre-stage RWD burnout smoke if holding gas or boost during countdown!
     if ((input.accelerate || input.boost) && this.smokeSystem) {
-      this.thrusterBurstIntensity = input.boost && this.hasSpaceXPackage ? 0.9 : 0.3;
+      this.thrusterBurstIntensity = input.boost && this.hasSpaceXPackage ? 0.9 : 0.35;
       this.gForce = 2.2;
       this.smokeSystem.emitFromRoadster({
         carPosition: this.position,
-        carRotation: this.rotation,
+        carQuaternion: this.quaternion,
         surfaceNormal: this.currentSurfaceNormal,
         speedMph: 25,
         lateralG: 0.4,
@@ -309,10 +408,10 @@ export class PhysicsEngine {
       });
     }
 
-    if (prev > 1.8 && this.countdown <= 1.8) {
+    if (prev > 1.6 && this.countdown <= 1.6) {
       this.track.setCountdownStage(1);
       soundEngine.playCountdownBeep(false);
-    } else if (prev > 1.1 && this.countdown <= 1.1) {
+    } else if (prev > 1.0 && this.countdown <= 1.0) {
       this.track.setCountdownStage(2);
       soundEngine.playCountdownBeep(false);
     } else if (prev > 0.4 && this.countdown <= 0.4) {
@@ -330,9 +429,14 @@ export class PhysicsEngine {
     }
   }
 
+  /**
+   * Flat Approach Run (s from 8m to 130m, heading in -Z straight into the base of the C-Ramp)
+   */
   private updateAcceleration(dt: number, input: PlayerInput, visuals: ThrusterVisualState) {
     this.elapsedRunTime += dt;
     this.currentSurfaceNormal.set(0, 1, 0);
+    this.cRampPitchDeg = 0;
+    this.isUpsideDown = false;
 
     const isHighFlow = this.speedMph >= 200;
     this.skirtMode = isHighFlow ? 'HIGH_FLOW_200MPH' : 'SEALED_2G';
@@ -346,137 +450,197 @@ export class PhysicsEngine {
     let accelRate = 16.76; // Standard 1.60s 0-60 mph RWD performance
     if (useRocketLaunch) {
       accelRate = 48.76; // 0-60 mph in 0.55 seconds!
-      this.boostFuel = Math.max(0, this.boostFuel - 12 * dt);
+      this.boostFuel = Math.max(0, this.boostFuel - 10 * dt);
       visuals.rearBoost = true;
       this.thrusterBurstIntensity = Math.max(this.thrusterBurstIntensity, 0.85);
     } else if (this.hasSpaceXPackage && input.boost && this.boostFuel > 0) {
       accelRate = 38.0;
-      this.boostFuel = Math.max(0, this.boostFuel - 14 * dt);
+      this.boostFuel = Math.max(0, this.boostFuel - 12 * dt);
       visuals.rearBoost = true;
     }
 
-    if (this.speedMph > 140 && !useRocketLaunch) {
-      accelRate *= isHighFlow ? 0.88 : 0.72;
-    }
-
     if (input.brake && !input.accelerate) {
-      this.velocity.z = Math.max(25, this.velocity.z - 32 * dt);
+      this.forwardSpeed = Math.max(28, this.forwardSpeed - 30 * dt);
       this.motorPowerKw = 0;
-      this.chassisPitchSquatRad = 0.035; // Brake nose dive
-      this.lateralG = Math.max(this.lateralG, 0.9); // Brake tire scrub smoke
+      this.chassisPitchSquatRad = 0.035;
+      this.lateralG = Math.max(this.lateralG, 0.9);
     } else {
-      this.velocity.z = Math.min(146, this.velocity.z + accelRate * dt);
+      this.forwardSpeed = Math.min(138, this.forwardSpeed + accelRate * dt);
       this.motorPowerKw = Math.min(1080, Math.round(350 + (this.speedMph / 240) * 730));
-      // Rear squat under >1MW RWD + 10,000 PSI CGT launch thrust!
       this.chassisPitchSquatRad = -Math.min(0.045, (accelRate / 48.76) * 0.042);
     }
 
-    const nextSpeedMph = this.velocity.z * 2.23694;
+    const nextSpeedMph = this.forwardSpeed * 2.23694;
     if (this.zeroToSixtySec === null && nextSpeedMph >= 60) {
       this.zeroToSixtySec = useRocketLaunch ? 0.55 : 1.60;
     }
 
-    // Tactile Responsive Steering, High-G Cornering Slip & Independent Yaw Control (Lars Moravy 21:09)
-    let steerInput = 0;
-    if (input.steerLeft) steerInput = -1;
-    if (input.steerRight) steerInput = 1;
-
-    this.steerAngleRad = -steerInput * 0.42; // Front wheels turn visibly!
-    const targetLatVel = steerInput * Math.min(16, 6 + this.velocity.z * 0.12);
+    // Proportional Steering via Virtual Thumbstick or Keyboard
+    const steerInput = this.getEffectiveSteerX(input);
+    this.steerAngleRad = -steerInput * 0.42;
+    const targetLatVel = steerInput * Math.min(15, 5 + this.forwardSpeed * 0.11);
     this.lateralVelocityX = THREE.MathUtils.damp(this.lateralVelocityX, targetLatVel, 9, dt);
-    this.position.x = THREE.MathUtils.clamp(this.position.x + this.lateralVelocityX * dt, -5.8, 5.8);
+    this.lateralOffsetX = THREE.MathUtils.clamp(
+      this.lateralOffsetX + this.lateralVelocityX * dt,
+      -3.4,
+      3.4
+    );
 
-    // If not steering, smoothly return toward centerline before entering the curved wall ramp
-    if (steerInput === 0 && this.position.z > 110) {
-      this.position.x = THREE.MathUtils.damp(this.position.x, 0, 5.0, dt);
-    }
-
-    // Compute High-G Cornering Lateral Acceleration (generates tire smoke when > 0.65G!)
     const speedFactor = Math.min(1.6, this.speedMph / 90);
-    this.lateralG = Math.abs(this.lateralVelocityX) * 0.16 * speedFactor + (steerInput !== 0 ? 0.75 * speedFactor : 0);
+    this.lateralG =
+      Math.abs(this.lateralVelocityX) * 0.16 * speedFactor +
+      (Math.abs(steerInput) > 0.15 ? 0.75 * Math.abs(steerInput) * speedFactor : 0);
     this.chassisRollRad = -steerInput * Math.min(0.065, this.lateralG * 0.028);
 
-    if (steerInput !== 0 && this.hasSpaceXPackage) {
-      visuals.rollDir = steerInput; // Independent Left/Right Yaw CGT fires to stabilize cornering!
+    if (Math.abs(steerInput) > 0.2 && this.hasSpaceXPackage) {
+      visuals.rollDir = steerInput > 0 ? 1 : -1;
     }
 
-    this.position.z += this.velocity.z * dt;
-    this.position.y = 0.35;
-    // Subtle yaw slip angle when carving left/right at high G!
-    const yawAngle = -this.lateralVelocityX * 0.0085;
-    this.rotation.set(0, yawAngle, 0, 'YXZ');
+    this.sDistance += this.forwardSpeed * dt;
+    const pt = this.track.getPointAtArcLength(Math.min(this.sDistance, this.track.rampSpecs.approachLength));
+
+    // Heading in -Z, so driver's right (+steerInput) corresponds to -X in world coordinates
+    this.position.set(-this.lateralOffsetX, 0.02, pt.position.z);
+    this.velocity.copy(pt.forward).multiplyScalar(this.forwardSpeed);
+    this.forwardDir.copy(pt.forward);
+    this.upDir.copy(pt.up);
+
+    // Subtle yaw slip angle when carving left/right
+    const yawSlip = -this.lateralVelocityX * 0.008;
+    this._zAxis.set(Math.sin(yawSlip), 0, -Math.cos(yawSlip)).normalize();
+    this._yAxis.set(0, 1, 0);
+    this._xAxis.crossVectors(this._yAxis, this._zAxis).normalize();
+    this._rotMatrix.makeBasis(this._xAxis, this._yAxis, this._zAxis);
+    this.quaternion.setFromRotationMatrix(this._rotMatrix);
+    this.rotation.setFromQuaternion(this.quaternion, 'YXZ');
 
     this.speedMph = nextSpeedMph;
     this.gForce = accelRate / 9.81;
     this.suspensionCompression = Math.min(1, this.gForce * 0.18 + this.lateralG * 0.12);
 
-    if (this.position.z >= this.track.rampSpecs.startZ) {
+    if (this.sDistance >= this.track.rampSpecs.approachLength) {
       this.phase = 'RAMP_CLIMB';
-      this.velocity.z = Math.max(this.velocity.z, 92);
+      this.forwardSpeed = Math.max(this.forwardSpeed, 88);
+      this.thrusterBurstIntensity = 0.9;
       soundEngine.playLaunchRampWhoosh();
     }
   }
 
+  /**
+   * Climbing the Vertical C-Ramp (0° -> 90° vertical wall -> 170° upside-down overhang)
+   * and Gliding Upside-Down along the 20m top overhang before launching!
+   */
   private updateRampClimb(dt: number, input: PlayerInput, visuals: ThrusterVisualState) {
     this.skirtMode = 'SEALED_2G';
     visuals.suctionFanActive = true;
     visuals.highFlowSkirtMode = false;
-    this.suctionG = 2.3;
+    this.suctionG = 2.4;
 
-    let accelRate = 24.0;
-    if (this.hasSpaceXPackage && this.boostFuel > 0) {
-      accelRate += 34.0;
-      this.boostFuel = Math.max(0, this.boostFuel - 13 * dt);
+    let accelRate = 18.0;
+    const isInvertedOverhang = this.cRampPitchDeg >= 85;
+    if (this.hasSpaceXPackage && (input.boost || isInvertedOverhang) && this.boostFuel > 0) {
+      accelRate += 28.0;
+      this.boostFuel = Math.max(0, this.boostFuel - 10 * dt);
       visuals.rearBoost = true;
-      this.thrusterBurstIntensity = Math.max(this.thrusterBurstIntensity, 0.75);
+      this.thrusterBurstIntensity = Math.max(this.thrusterBurstIntensity, isInvertedOverhang ? 0.85 : 0.65);
     }
 
-    this.velocity.z = Math.min(152, Math.max(92, this.velocity.z + accelRate * dt));
+    this.forwardSpeed = Math.min(138, Math.max(88, this.forwardSpeed + accelRate * dt));
     this.motorPowerKw = 1050;
-    const nextZ = this.position.z + this.velocity.z * dt;
+    this.sDistance += this.forwardSpeed * dt;
 
-    const surf = this.track.getRampSurfaceAt(nextZ);
-    this.currentSurfaceNormal.copy(surf.normal);
+    // Player can steer across the C-ramp width while climbing!
+    const steerInput = this.getEffectiveSteerX(input);
+    this.steerAngleRad = -steerInput * 0.28;
+    const targetLatVel = steerInput * 8.5;
+    this.lateralVelocityX = THREE.MathUtils.damp(this.lateralVelocityX, targetLatVel, 8, dt);
+    this.lateralOffsetX = THREE.MathUtils.clamp(
+      this.lateralOffsetX + this.lateralVelocityX * dt,
+      -3.2,
+      3.2
+    );
 
-    if (surf.isPastLip) {
+    const rampSpan = this.track.arcLength + this.track.rampSpecs.overhangLength;
+    this.rampProgress = THREE.MathUtils.clamp(
+      (this.sDistance - this.track.rampSpecs.approachLength) / rampSpan,
+      0,
+      1
+    );
+
+    const pt = this.track.getPointAtArcLength(this.sDistance);
+    this.cRampPitchDeg = pt.pitchDeg;
+    this.isUpsideDown = pt.pitchDeg > 95;
+    this.currentSurfaceNormal.copy(pt.up);
+    this.forwardDir.copy(pt.forward);
+    this.upDir.copy(pt.up);
+
+    // Did the Roadster just glide past the top upside-down overhang lip of the C-Ramp?
+    if (pt.isPastLip) {
       this.phase = 'AIRBORNE';
       this.skirtMode = 'FLIGHT';
-      this.jumpStartDistance = this.track.rampSpecs.endZ;
+      this.jumpStartZ = this.track.rampSpecs.launchLipZ;
       this.thrusterBurstIntensity = 1.0;
+      this.airElapsed = 0;
 
-      const launchSpeed = Math.max(this.velocity.z, 102);
-      const launchAngle = Math.max(surf.pitchRad, 0.36);
+      const launchSpeed = Math.max(this.forwardSpeed, 96);
+      const boostBonusZ = input.boost && this.hasSpaceXPackage ? 18 : 6;
+      const boostBonusY = input.boost && this.hasSpaceXPackage ? 8 : 3;
+
+      // Preserve lateral steering momentum + natural high-altitude drift vector so the car
+      // does NOT fly in a locked straight line — the player MUST steer and flip upright to land on the road!
+      const driftSign = Math.abs(this.position.x) > 0.4 ? Math.sign(this.position.x) : Math.random() > 0.5 ? 1 : -1;
+      const initialDriftVx = -this.lateralVelocityX * 0.9 + this.position.x * 1.1 + driftSign * 3.6;
+
       this.velocity.set(
-        0,
-        Math.sin(launchAngle) * launchSpeed + (input.boost && this.hasSpaceXPackage ? 11 : 5),
-        Math.cos(launchAngle) * launchSpeed + (input.boost && this.hasSpaceXPackage ? 20 : 8)
+        initialDriftVx,
+        pt.forward.y * launchSpeed + boostBonusY,
+        pt.forward.z * launchSpeed + boostBonusZ
       );
 
-      this.cumulativeRollRad = Math.PI;
-      this.targetAutoRollRad = Math.PI * 2;
-      this.barrelRollsCount = 1;
+      // Exact continuous orientation at the 170° launch lip:
+      // +10° nose-up flight angle in +Z (`airPitchRad = -10°`) AND 180° upside-down roll (`cumulativeRollRad = Math.PI`)!
+      const overhangNoseUpRad = ((180 - this.track.rampSpecs.maxAngleDeg) * Math.PI) / 180;
+      this.airPitchRad = -overhangNoseUpRad;
+      this.airYawRad = Math.atan2(this.velocity.x, this.velocity.z);
+      this.cumulativeRollRad = Math.PI; // Starts 180° UPSIDE-DOWN at the lip!
+      this.rollAngularVel = steerInput !== 0 ? steerInput * 2.2 : 0.45; // Slight initial roll momentum
+      this.assistTargetRollRad = null; // Full manual control unless player steers or taps Flip [E]!
+      this.barrelRollsCount = 0;
+      this.isUpsideDown = true;
 
       soundEngine.playLaunchRampWhoosh();
       return;
     }
 
-    const offsetFromSurface = surf.normal.clone().multiplyScalar(0.35);
-    this.position.copy(surf.position).add(offsetFromSurface);
-    this.rotation.set(-surf.pitchRad, 0, surf.rollRad, 'YXZ');
+    // Keep tires in tight contact with the curved C-ramp and upside-down overhang ceiling!
+    this.position.copy(pt.position).addScaledVector(pt.up, 0.02);
+    this.position.x = -this.lateralOffsetX;
+    this.velocity.copy(pt.forward).multiplyScalar(this.forwardSpeed);
 
-    this.speedMph = (this.velocity.z / Math.cos(surf.pitchRad)) * 2.23694;
-    this.gForce = 2.3 + (this.velocity.z * this.velocity.z) / (115 * 9.81);
-    // High lateral & centripetal G on the curved wall climb triggers tire friction smoke!
+    this._xAxis.crossVectors(pt.up, pt.forward).normalize();
+    this._rotMatrix.makeBasis(this._xAxis, pt.up, pt.forward);
+    this.quaternion.setFromRotationMatrix(this._rotMatrix);
+    this.rotation.setFromQuaternion(this.quaternion, 'YXZ');
+
+    this.speedMph = this.forwardSpeed * 2.23694;
+    this.gForce = 2.4 + (this.forwardSpeed * this.forwardSpeed) / (this.track.rampSpecs.radius * 9.81 * 3.5);
     this.lateralG = 1.45;
-    this.suspensionCompression = 0.78;
-    this.steerAngleRad = 0.08;
+    this.suspensionCompression = 0.72;
     this.chassisRollRad = 0;
-    this.chassisPitchSquatRad = -0.025;
+    this.chassisPitchSquatRad = -0.02;
   }
 
+  /**
+   * Full Player-Controlled Airborne Flight, Roll Flip & Road Alignment:
+   * - Car launches upside-down (180° roll) with lateral drift velocity.
+   * - Player uses Left Virtual Thumbstick (or WASD/Arrows + [E] Flip button) to:
+   *   1. Roll the car from 180° upside-down to 0° upright
+   *   2. Vector lateral SpaceX Cold-Gas Thrusters to steer left/right onto the 34m-wide asphalt runway
+   *   3. Control nose pitch up/down for maximum glide distance and a level 4-wheel touchdown!
+   */
   private updateAirborne(dt: number, input: PlayerInput, visuals: ThrusterVisualState) {
+    this.airElapsed += dt;
     this.suctionG = 0.0;
-    this.lateralG = 0.0;
     this.skirtMode = 'FLIGHT';
     this.suspensionCompression = 0.0;
     this.steerAngleRad = 0;
@@ -485,84 +649,151 @@ export class PhysicsEngine {
     this.motorPowerKw = 180;
     this.currentSurfaceNormal.set(0, 1, 0);
 
+    const ctrlX = this.getEffectiveSteerX(input); // -1 (left) to +1 (right)
+    const ctrlY = this.getEffectivePitchY(input); // -1 (nose down) to +1 (nose up)
+
     const baseGravity = -9.81;
-    const forwardSpeed = this.velocity.z;
-    const aeroLift = Math.min(3.9, forwardSpeed * 0.029);
+    const forwardVelZ = this.velocity.z;
+    // Pitching the nose slightly upward (+5° to +18°) generates aerodynamic body lift for longer jumps!
+    const currentNoseUpDeg = (-this.airPitchRad * 180) / Math.PI;
+    const pitchLiftBonus = THREE.MathUtils.clamp(currentNoseUpDeg * 0.08, -1.2, 1.6);
+    const aeroLift = Math.min(3.9, forwardVelZ * 0.028) + pitchLiftBonus;
 
     let thrustZ = 0;
     let thrustY = 0;
 
     if (this.hasSpaceXPackage && input.boost && this.boostFuel > 0) {
       thrustZ = 36.0;
-      thrustY = 8.0;
-      this.boostFuel = Math.max(0, this.boostFuel - 15 * dt);
+      thrustY = 8.4;
+      this.boostFuel = Math.max(0, this.boostFuel - 13 * dt);
       visuals.rearBoost = true;
       visuals.hoverThrust = true;
     } else if (this.hasSpaceXPackage && input.accelerate && this.boostFuel > 0) {
       thrustZ = 15.0;
-      thrustY = 4.4;
-      this.boostFuel = Math.max(0, this.boostFuel - 7 * dt);
+      thrustY = 4.6;
+      this.boostFuel = Math.max(0, this.boostFuel - 6.0 * dt);
       visuals.hoverThrust = true;
       visuals.rearBoost = true;
     }
 
-    if (this.hasSpaceXPackage && this.position.y < 13.0 && this.velocity.y < -5.5) {
-      thrustY += 6.8;
+    // SpaceX Vertical Hover-Jet Cushion burn when descending near the runway IF the car is upright!
+    const normRollDeg = this.getNormalizedRollDeg();
+    const isUpright = Math.abs(normRollDeg) <= 35;
+    if (this.hasSpaceXPackage && isUpright && this.position.y < 13.0 && this.velocity.y < -4.5) {
+      thrustY += 6.2;
       visuals.hoverThrust = true;
-      this.thrusterBurstIntensity = Math.max(this.thrusterBurstIntensity, 0.55);
+      this.thrusterBurstIntensity = Math.max(this.thrusterBurstIntensity, 0.5);
     }
 
+    // ============================================================================
+    // 1. MANUAL LATERAL ROAD STEERING (X-Axis Velocity & Runway Alignment)
+    // ============================================================================
+    // In +Z flight, +X is to the left of the runway and -X is to the right of the runway!
+    // Moving thumbstick right (ctrlX > 0) thrusts toward -X (right side of road);
+    // Moving thumbstick left (ctrlX < 0) thrusts toward +X (left side of road).
+    const lateralThrustAccel = -ctrlX * (this.hasSpaceXPackage ? 28.0 : 16.0);
+    // Bank angle also curves the aerodynamic flight path slightly
+    const bankCurveAccel = Math.sin(this.cumulativeRollRad) * 3.2;
+    this.velocity.x += (lateralThrustAccel + bankCurveAccel) * dt;
+    // Gentle lateral air drag so steering feels crisp and controllable
+    this.velocity.x *= Math.exp(-1.35 * dt);
+    this.lateralVelocityX = this.velocity.x;
+    this.lateralG = Math.abs(ctrlX) * 1.1;
+
     const accelY = baseGravity + aeroLift + thrustY;
-    const dragZ = -0.00042 * forwardSpeed * forwardSpeed;
+    const dragZ = -0.00042 * forwardVelZ * forwardVelZ;
     const accelZ = thrustZ + dragZ;
 
     this.velocity.y += accelY * dt;
-    this.velocity.z = Math.max(48, this.velocity.z + accelZ * dt);
+    this.velocity.z = Math.max(52, this.velocity.z + accelZ * dt);
 
-    this.position.x = THREE.MathUtils.damp(this.position.x, 0, 2.2, dt);
+    this.position.x = THREE.MathUtils.clamp(this.position.x + this.velocity.x * dt, -42, 42);
     this.position.y += this.velocity.y * dt;
     this.position.z += this.velocity.z * dt;
 
-    if (input.rollLeft) {
-      this.targetAutoRollRad -= 5.2 * dt;
-      visuals.rollDir = -1;
-    } else if (input.rollRight) {
-      this.targetAutoRollRad += 5.2 * dt;
-      visuals.rollDir = 1;
+    // ============================================================================
+    // 2. MANUAL ROLL FLIP CONTROL (180° Upside-Down -> 0° Upright!)
+    // ============================================================================
+    if (Math.abs(ctrlX) > 0.06) {
+      // Player is actively rolling/steering with Thumbstick or A/D keys!
+      this.assistTargetRollRad = null;
+      const targetRollRate = ctrlX * 4.4;
+      this.rollAngularVel = THREE.MathUtils.damp(this.rollAngularVel, targetRollRate, 10, dt);
+      this.cumulativeRollRad += this.rollAngularVel * dt;
+      visuals.rollDir = ctrlX > 0 ? 1 : -1;
+      visuals.hoverThrust = true;
+    } else if (this.assistTargetRollRad !== null) {
+      // Player tapped the Quick Flip Upright / 360° Roll [E] thruster button
+      const diff = this.assistTargetRollRad - this.cumulativeRollRad;
+      if (Math.abs(diff) > 0.04) {
+        visuals.rollDir = diff > 0 ? 1 : -1;
+        visuals.hoverThrust = true;
+        this.cumulativeRollRad = THREE.MathUtils.damp(
+          this.cumulativeRollRad,
+          this.assistTargetRollRad,
+          5.5,
+          dt
+        );
+      } else {
+        this.cumulativeRollRad = this.assistTargetRollRad;
+        this.assistTargetRollRad = null;
+      }
+      this.rollAngularVel = 0;
     } else {
-      const nearestUpright = Math.round(this.targetAutoRollRad / (Math.PI * 2)) * (Math.PI * 2);
-      this.targetAutoRollRad = THREE.MathUtils.damp(this.targetAutoRollRad, nearestUpright, 3.6, dt);
+      // Stick released: damp angular roll velocity, and if the player has rolled within ±34° of upright (0°/360°),
+      // gently engage the SpaceX upright attitude detent so it locks cleanly onto all 4 wheels!
+      this.rollAngularVel = THREE.MathUtils.damp(this.rollAngularVel, 0, 5, dt);
+      this.cumulativeRollRad += this.rollAngularVel * dt;
+
+      if (Math.abs(normRollDeg) < 34) {
+        const nearestUpright =
+          Math.round(this.cumulativeRollRad / (Math.PI * 2)) * (Math.PI * 2);
+        this.cumulativeRollRad = THREE.MathUtils.damp(
+          this.cumulativeRollRad,
+          nearestUpright,
+          6.0,
+          dt
+        );
+      }
     }
 
-    const rollDiff = this.targetAutoRollRad - this.cumulativeRollRad;
-    if (Math.abs(rollDiff) > 0.08) {
-      visuals.rollDir = rollDiff > 0 ? 1 : -1;
-    }
-    this.cumulativeRollRad = THREE.MathUtils.damp(this.cumulativeRollRad, this.targetAutoRollRad, 4.4, dt);
-
-    const totalRolls = Math.max(1, Math.floor((Math.abs(this.cumulativeRollRad - Math.PI) + 0.4) / Math.PI));
-    if (totalRolls > this.barrelRollsCount) {
-      this.barrelRollsCount = totalRolls;
+    const completedHalfTurns = Math.floor((Math.abs(this.cumulativeRollRad - Math.PI) + 0.45) / Math.PI);
+    if (completedHalfTurns > this.barrelRollsCount) {
+      this.barrelRollsCount = completedHalfTurns;
     }
 
-    const flightPathPitch = Math.atan2(this.velocity.y, this.velocity.z) * 0.45;
-    let targetPitch = -flightPathPitch;
+    const updatedNormRoll = this.getNormalizedRollDeg();
+    this.isUpsideDown = Math.abs(updatedNormRoll) > 90;
 
-    if (input.pitchUp) {
-      targetPitch -= 0.30;
-      visuals.pitchDir = 1;
-    } else if (input.pitchDown) {
-      targetPitch += 0.28;
-      visuals.pitchDir = -1;
+    // ============================================================================
+    // 3. MANUAL PITCH CONTROL (Thumbstick Y-Axis or W/S / Up/Down)
+    // ============================================================================
+    const flightPathPitch = Math.atan2(this.velocity.y, this.velocity.z) * 0.35;
+    if (Math.abs(ctrlY) > 0.06) {
+      // Direct proportional pitch control from player thumbstick/keys
+      const targetManualPitch = THREE.MathUtils.clamp(
+        -flightPathPitch - ctrlY * 0.42,
+        -0.52, // +30° nose up max
+        0.48   // -27° nose down max
+      );
+      this.airPitchRad = THREE.MathUtils.damp(this.airPitchRad, targetManualPitch, 6.5, dt);
+      visuals.pitchDir = ctrlY > 0 ? 1 : -1;
+    } else {
+      // Subtle aerodynamic trim toward flight path when stick Y is neutral
+      const trimPitch = THREE.MathUtils.clamp(-flightPathPitch, -0.22, 0.22);
+      this.airPitchRad = THREE.MathUtils.damp(this.airPitchRad, trimPitch, 2.8, dt);
     }
 
-    if (this.position.y < 18 && this.velocity.y < 0 && !input.pitchDown) {
-      targetPitch = THREE.MathUtils.lerp(targetPitch, -0.06, 0.68);
-      visuals.pitchDir = 1;
-    }
+    // Subtle visual yaw alignment with lateral velocity vector so the player feels the car carving through the air!
+    const targetAirYaw = Math.atan2(this.velocity.x, this.velocity.z) * 0.65;
+    this.airYawRad = THREE.MathUtils.damp(this.airYawRad, targetAirYaw, 6.0, dt);
 
-    const dampedPitch = THREE.MathUtils.damp(this.rotation.x, targetPitch, 5.2, dt);
-    this.rotation.set(dampedPitch, 0, this.cumulativeRollRad, 'YXZ');
+    this.rotation.set(this.airPitchRad, this.airYawRad, this.cumulativeRollRad, 'YXZ');
+    this.quaternion.setFromEuler(this.rotation);
+
+    this.forwardDir.set(0, 0, 1).applyQuaternion(this.quaternion);
+    this.upDir.set(0, 1, 0).applyQuaternion(this.quaternion);
+    this.cRampPitchDeg = Math.round((-this.airPitchRad * 180) / Math.PI);
 
     this.speedMph = this.velocity.length() * 2.23694;
     this.gForce = Math.max(0.5, (accelY + 9.81) / 9.81);
@@ -574,26 +805,31 @@ export class PhysicsEngine {
       }
     });
 
-    if (this.position.y <= 0.35 && this.position.z > this.track.rampSpecs.endZ + 20) {
+    if (this.position.y <= 0.04 && this.position.z > this.jumpStartZ + 30) {
       this.handleTouchdown();
     }
   }
 
   private handleTouchdown() {
-    this.position.y = 0.35;
+    this.position.y = 0.02;
     this.phase = 'ROLLOUT';
+    this.isUpsideDown = false;
     this.suspensionCompression = 1.0;
-    this.touchdownSmokeBurst = 1.0; // Massive tire bark & smoke cloud on runway touchdown!
+    this.touchdownSmokeBurst = 1.0;
     this.currentSurfaceNormal.set(0, 1, 0);
 
-    const pitchDeg = Math.abs((this.rotation.x * 180) / Math.PI);
-    const rawRollDeg = ((this.rotation.z * 180) / Math.PI) % 360;
-    const normRollDeg = Math.abs(
-      rawRollDeg > 180 ? rawRollDeg - 360 : rawRollDeg < -180 ? rawRollDeg + 360 : rawRollDeg
-    );
+    const pitchDeg = Math.abs((this.airPitchRad * 180) / Math.PI);
+    const normRollDeg = Math.abs(this.getNormalizedRollDeg());
+    const isOnRunway = Math.abs(this.position.x) <= this.runwayHalfWidth;
+    this.landedOffRoad = !isOnRunway;
 
     let multiplier = 1.0;
-    if (pitchDeg < 16 && normRollDeg < 22) {
+    if (!isOnRunway) {
+      // Missed the road! Landed outside the 34m asphalt runway
+      this.landingGrade = 'crash';
+      multiplier = 0.55;
+      soundEngine.playTouchdown('crash');
+    } else if (pitchDeg < 16 && normRollDeg < 24) {
       this.landingGrade = 'smooth';
       multiplier = 1.30;
       soundEngine.playTouchdown('smooth');
@@ -601,54 +837,74 @@ export class PhysicsEngine {
       this.landingGrade = 'solid';
       multiplier = 1.12;
       soundEngine.playTouchdown('smooth');
-    } else if (pitchDeg < 45 && normRollDeg < 75) {
+    } else if (pitchDeg < 42 && normRollDeg < 72) {
       this.landingGrade = 'rough';
-      multiplier = 0.9;
+      multiplier = 0.88;
       soundEngine.playTouchdown('rough');
     } else {
+      // Landed upside-down or extreme nose-dive!
       this.landingGrade = 'crash';
-      multiplier = 0.65;
+      multiplier = 0.60;
       soundEngine.playTouchdown('crash');
     }
 
-    const airDist = Math.max(0, this.position.z - this.jumpStartDistance);
-    this.rolloutBonus = airDist * (multiplier - 1.0) + this.barrelRollsCount * 45;
+    const airDist = Math.max(0, this.position.z - this.jumpStartZ);
+    this.rolloutBonus = isOnRunway
+      ? airDist * (multiplier - 1.0) + this.barrelRollsCount * 45
+      : -airDist * 0.25;
 
     this.velocity.y = 0;
-    this.velocity.x = 0;
-    this.velocity.z = Math.max(25, this.velocity.z * multiplier * 0.85);
+    this.velocity.z = Math.max(20, this.velocity.z * multiplier * 0.85);
 
-    this.rotation.set(0, 0, 0, 'YXZ');
+    this.rotation.set(0, this.airYawRad * 0.5, 0, 'YXZ');
+    this.quaternion.setFromEuler(this.rotation);
+    this.forwardDir.set(0, 0, 1).applyQuaternion(this.quaternion);
+    this.upDir.set(0, 1, 0);
   }
 
   private updateRollout(dt: number, input: PlayerInput, visuals: ThrusterVisualState) {
     this.suspensionCompression = THREE.MathUtils.damp(this.suspensionCompression, 0.15, 5, dt);
     this.skirtMode = this.speedMph >= 200 ? 'HIGH_FLOW_200MPH' : 'SEALED_2G';
     this.currentSurfaceNormal.set(0, 1, 0);
+    this.isUpsideDown = false;
+    this.cRampPitchDeg = 0;
 
-    // Steering & High-G Drift Smoke during high-speed rollout!
-    let steerInput = 0;
-    if (input.steerLeft) steerInput = -1;
-    if (input.steerRight) steerInput = 1;
+    // Steering & High-G Drift Smoke during high-speed rollout along the +Z runway!
+    const steerInput = this.getEffectiveSteerX(input);
     this.steerAngleRad = -steerInput * 0.38;
-    const targetLat = steerInput * Math.min(14, this.velocity.z * 0.18);
+    const targetLat = -steerInput * Math.min(16, this.velocity.z * 0.20);
     this.lateralVelocityX = THREE.MathUtils.damp(this.lateralVelocityX, targetLat, 8, dt);
-    this.position.x = THREE.MathUtils.clamp(this.position.x + this.lateralVelocityX * dt, -14, 14);
-    this.lateralG = Math.abs(this.lateralVelocityX) * 0.18 + (input.brake && this.speedMph > 40 ? 1.1 : 0);
+    this.position.x = THREE.MathUtils.clamp(this.position.x + this.lateralVelocityX * dt, -38, 38);
+
+    const isOffRoadNow = Math.abs(this.position.x) > this.runwayHalfWidth;
+    if (isOffRoadNow) {
+      this.landedOffRoad = true;
+    }
+
+    this.lateralG =
+      Math.abs(this.lateralVelocityX) * 0.18 +
+      (input.brake && this.speedMph > 40 ? 1.1 : 0) +
+      (isOffRoadNow ? 0.9 : 0);
     this.chassisRollRad = -steerInput * Math.min(0.06, this.lateralG * 0.025);
 
-    const decel = input.brake ? 48.0 : 22.0;
-    if (this.hasSpaceXPackage && input.boost && this.boostFuel > 0) {
+    // Extra off-road drag if the player rolls off the asphalt runway onto the desert floor
+    const baseDecel = isOffRoadNow ? 42.0 : 22.0;
+    const decel = input.brake ? 52.0 : baseDecel;
+
+    if (this.hasSpaceXPackage && input.boost && this.boostFuel > 0 && !isOffRoadNow) {
       this.velocity.z += 22 * dt;
-      this.boostFuel = Math.max(0, this.boostFuel - 15 * dt);
+      this.boostFuel = Math.max(0, this.boostFuel - 14 * dt);
       visuals.rearBoost = true;
     } else {
       this.velocity.z = Math.max(0, this.velocity.z - decel * dt);
     }
 
     this.position.z += this.velocity.z * dt;
-    this.position.y = 0.35;
-    this.rotation.set(0, -this.lateralVelocityX * 0.01, 0, 'YXZ');
+    this.position.y = 0.02;
+    this.rotation.set(0, Math.atan2(this.lateralVelocityX, Math.max(10, this.velocity.z)), 0, 'YXZ');
+    this.quaternion.setFromEuler(this.rotation);
+    this.forwardDir.set(0, 0, 1).applyQuaternion(this.quaternion);
+    this.upDir.set(0, 1, 0);
 
     this.speedMph = this.velocity.z * 2.23694;
     this.gForce = input.brake ? 1.8 : 1.0;
@@ -663,7 +919,7 @@ export class PhysicsEngine {
     if (this.velocity.z <= 0.4) {
       this.velocity.set(0, 0, 0);
       this.phase = 'COMPLETED';
-      this.finalDistance = Math.max(0, this.position.z - this.jumpStartDistance);
+      this.finalDistance = Math.max(0, this.position.z - this.jumpStartZ);
 
       if (this.onScoreCallback && this.landingGrade) {
         this.onScoreCallback(this.finalDistance, this.landingGrade, this.speedMph);
@@ -673,27 +929,40 @@ export class PhysicsEngine {
 
   private syncCarTransform() {
     this.carModel.group.position.copy(this.position);
-    this.carModel.group.rotation.copy(this.rotation);
+    this.carModel.group.quaternion.copy(this.quaternion);
   }
 
   public getTelemetry(): Telemetry {
     const flightDist =
       this.phase === 'AIRBORNE' || this.phase === 'ROLLOUT' || this.phase === 'COMPLETED'
-        ? Math.max(0, this.position.z - this.jumpStartDistance)
+        ? Math.max(0, this.position.z - this.jumpStartZ)
         : 0;
 
-    const rawRoll = Math.round(((this.rotation.z * 180) / Math.PI) % 360);
+    const normRoll =
+      this.phase === 'RAMP_CLIMB'
+        ? this.isUpsideDown
+          ? 180
+          : 0
+        : Math.round(this.getNormalizedRollDeg());
+
     const isOnSurface =
       this.phase === 'ACCELERATION' || this.phase === 'RAMP_CLIMB' || this.phase === 'ROLLOUT';
     const isTireSmoking =
-      (isOnSurface && (this.lateralG > 0.65 || this.gForce > 1.85 || this.touchdownSmokeBurst > 0.1)) ||
+      (isOnSurface &&
+        (this.lateralG > 0.65 || this.gForce > 1.85 || this.touchdownSmokeBurst > 0.1)) ||
       this.thrusterBurstIntensity > 0.25;
+
+    // Positive lateralOffsetMeters = Right of centerline, Negative = Left of centerline
+    const signedRoadOffset =
+      this.phase === 'STAGING' || this.phase === 'ACCELERATION' || this.phase === 'RAMP_CLIMB'
+        ? this.lateralOffsetX
+        : -this.position.x;
 
     return {
       phase: this.phase,
       speedMph: Math.round(this.speedMph),
       speedKmh: Math.round(this.speedMph * 1.60934),
-      altitudeMeters: Math.max(0, Math.round((this.position.y - 0.35) * 10) / 10),
+      altitudeMeters: Math.max(0, Math.round((this.position.y - 0.02) * 10) / 10),
       distanceJumpedMeters: Math.round(flightDist * 10) / 10,
       totalDistanceMeters: Math.round(Math.max(0, this.position.z) * 10) / 10,
       boostFuelPct: Math.round(this.boostFuel),
@@ -701,8 +970,13 @@ export class PhysicsEngine {
       motorPowerKw: this.motorPowerKw,
       skirtMode: this.skirtMode,
       zeroToSixtySec: this.zeroToSixtySec,
-      pitchDeg: Math.round((-this.rotation.x * 180) / Math.PI),
-      rollDeg: rawRoll,
+      pitchDeg: Math.round(this.cRampPitchDeg),
+      rollDeg: normRoll,
+      isUpsideDown: this.isUpsideDown,
+      isUprightReady: Math.abs(normRoll) <= 28,
+      lateralOffsetMeters: Math.round(signedRoadOffset * 10) / 10,
+      isOnRunwayCorridor: Math.abs(signedRoadOffset) <= this.runwayHalfWidth,
+      landedOffRoad: this.landedOffRoad,
       barrelRollsCount: this.barrelRollsCount,
       suctionG: Math.round(this.suctionG * 10) / 10,
       gForce: Math.round(this.gForce * 10) / 10,

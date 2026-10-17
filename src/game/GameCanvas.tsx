@@ -1,7 +1,9 @@
 /**
  * Three.js 3D WebGL Canvas Component
- * Sets up the scene, studio environment, tire smoke particle system, physics loop,
- * tactile camera FOV warp & G-force shake, and responsive keyboard/touch input handling
+ * Features:
+ * - Logarithmic depth buffer & tight frustum (0.6m..3500m) for zero Z-fighting on mobile & desktop GPUs
+ * - Relative camera offset damping (locks onto the Roadster with zero frame-time jitter or flickering)
+ * - Throttled HUD React state synchronization for rock-solid 60fps mobile performance
  */
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
@@ -31,10 +33,14 @@ interface GameCanvasProps {
   inputStateRef: React.MutableRefObject<PlayerInput>;
 }
 
-// Pre-allocated vectors for 60fps zero-GC camera interpolation
-const _camPosTarget = new THREE.Vector3();
+// Pre-allocated vectors for 60fps zero-GC relative camera tracking
+const _targetCamOffset = new THREE.Vector3(0, 2.05, 6.8);
+const _smoothedCamOffset = new THREE.Vector3(0, 2.05, 6.8);
+const _targetLookOffset = new THREE.Vector3(0, 0.9, -7.0);
+const _smoothedLookOffset = new THREE.Vector3(0, 0.9, -7.0);
 const _lookTarget = new THREE.Vector3();
 const _carForward = new THREE.Vector3();
+const _carUp = new THREE.Vector3();
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
   onTelemetryUpdate,
@@ -68,27 +74,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const container = mountRef.current;
     if (!container) return;
 
-    // 1. Scene, Camera, Renderer
+    // 1. Scene, Camera, Renderer (Tight near/far + logarithmicDepthBuffer prevents all mobile Z-fighting!)
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x090c14);
-    scene.fog = new THREE.FogExp2(0x090c14, 0.00055);
+    scene.background = new THREE.Color(0x070a12);
+    scene.fog = new THREE.FogExp2(0x070a12, 0.00048);
 
     const camera = new THREE.PerspectiveCamera(
       62,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      9000
+      Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
+      0.6,
+      3500
     );
-    camera.position.set(0, 3.2, -34);
+    camera.position.set(0, 2.2, 129);
+    camera.lookAt(0, 1.2, 100);
 
     const isHeadless = navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent);
     const renderer = new THREE.WebGLRenderer({
       powerPreference: 'high-performance',
       antialias: true,
       stencil: false,
+      logarithmicDepthBuffer: !isHeadless,
     });
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(isHeadless ? 1 : Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(isHeadless ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
@@ -103,33 +111,33 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     pmremGenerator.dispose();
 
     // 3. Studio Lighting Rig
-    const ambientLight = new THREE.HemisphereLight(0x88b4dc, 0x181c26, 0.75);
+    const ambientLight = new THREE.HemisphereLight(0x88b4dc, 0x181c26, 0.85);
     scene.add(ambientLight);
 
     const sunKeyLight = new THREE.DirectionalLight(0xfff6eb, 2.0);
     sunKeyLight.position.set(45, 110, 60);
     sunKeyLight.castShadow = !isHeadless;
-    sunKeyLight.shadow.mapSize.width = 2048;
-    sunKeyLight.shadow.mapSize.height = 2048;
-    sunKeyLight.shadow.camera.near = 10;
-    sunKeyLight.shadow.camera.far = 450;
-    const shadowD = 65;
+    sunKeyLight.shadow.mapSize.width = 1024;
+    sunKeyLight.shadow.mapSize.height = 1024;
+    sunKeyLight.shadow.camera.near = 15;
+    sunKeyLight.shadow.camera.far = 350;
+    const shadowD = 55;
     sunKeyLight.shadow.camera.left = -shadowD;
     sunKeyLight.shadow.camera.right = shadowD;
     sunKeyLight.shadow.camera.top = shadowD;
     sunKeyLight.shadow.camera.bottom = -shadowD;
-    sunKeyLight.shadow.bias = -0.0003;
+    sunKeyLight.shadow.bias = -0.0005;
     scene.add(sunKeyLight);
 
-    const followLight = new THREE.PointLight(0x88e5ff, 1.5, 60);
+    const followLight = new THREE.PointLight(0x88e5ff, 1.4, 65);
     scene.add(followLight);
 
-    // 4. Build SpaceX McGregor Track & Half-Circle Overhang Ramp
+    // 4. Build SpaceX Inverted C-Ramp & Landing Runway
     const track = new TrackBuilder();
     scene.add(track.group);
     trackRef.current = track;
 
-    // 5. Build 2026 Tesla Roadster Model
+    // 5. Build New Tesla Roadster Model
     const carModel = new TeslaRoadsterModel({
       bodyColor: activeColor,
       hasSpaceXPackage: hasSpaceXPackage,
@@ -148,11 +156,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     physics.setSpaceXPackage(hasSpaceXPackage);
     physicsRef.current = physics;
 
+    _smoothedCamOffset.set(0, 2.05, 6.8);
+    _smoothedLookOffset.set(0, 0.9, -7.0);
+
     physics.setOnScore((distance, grade, speed) => {
       const result = dailyChallengeManager.submitScore(distance, grade, speed);
       if (result.isDailyWinner || result.rank <= 3) {
         confetti({
-          particleCount: 110,
+          particleCount: 100,
           spread: 75,
           origin: { y: 0.6 },
         });
@@ -166,112 +177,121 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       });
     });
 
-    // 8. Horizon-Stabilized Tactile Camera Loop
+    // 8. Jitter-Free Relative Camera Tracking Loop
     let lastTime = performance.now();
+    let lastHudSyncTime = 0;
     let animId: number;
 
     const animate = (currentTime: number) => {
       animId = requestAnimationFrame(animate);
 
-      const dt = Math.min((currentTime - lastTime) / 1000, 0.05);
+      const dt = Math.min((currentTime - lastTime) / 1000, 0.04);
       lastTime = currentTime;
 
       physics.update(dt, inputStateRef.current);
 
-      sunKeyLight.position.set(physics.position.x + 35, 90, physics.position.z + 45);
-      sunKeyLight.target = carModel.group;
-      followLight.position.set(physics.position.x, physics.position.y + 4.5, physics.position.z);
+      // Snap directional shadow light in coarse steps so shadow texels never swim or flicker
+      const snapZ = Math.round(physics.position.z / 10) * 10;
+      sunKeyLight.position.set(35, 95, snapZ + 45);
+      followLight.position.set(physics.position.x, physics.position.y + 4.2, physics.position.z);
 
-      // Dynamic FOV Warp based on speed & sudden 10,000 PSI thruster burst!
-      const speedNorm = Math.min(physics.speedMph / 260, 1.25);
-      const targetFov =
-        cameraMode === 'SHOWROOM'
-          ? 50
-          : 60 + speedNorm * 10 + physics.thrusterBurstIntensity * 7;
+      // Smooth FOV warp based on speed
+      const speedNorm = Math.min(physics.speedMph / 260, 1.2);
+      const targetFov = cameraMode === 'SHOWROOM' ? 50 : 60 + speedNorm * 9;
       if (Math.abs(camera.fov - targetFov) > 0.05) {
-        camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 8, dt);
+        camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 6, dt);
         camera.updateProjectionMatrix();
       }
 
-      // Subtle tactile G-force & thruster vibration shake
-      const shakeMag =
-        cameraMode === 'SHOWROOM'
-          ? 0
-          : (physics.thrusterBurstIntensity * 0.055 + Math.max(0, physics.lateralG - 0.7) * 0.03);
-      const shakeX = (Math.random() - 0.5) * shakeMag;
-      const shakeY = (Math.random() - 0.5) * shakeMag;
-
       if (cameraMode === 'CHASE') {
-        const distBehind = 5.8 + speedNorm * 2.2 - physics.thrusterBurstIntensity * 0.5;
+        const distBehind = 6.4 + speedNorm * 1.6;
 
-        const camX =
-          physics.phase === 'RAMP_CLIMB'
-            ? physics.position.x * 0.45 - 2.2
-            : physics.position.x * 0.72;
+        if (physics.phase === 'STAGING' || physics.phase === 'ACCELERATION') {
+          // Approach Run: Car heads in -Z toward the C-Ramp. Offset is +Z behind the car.
+          _targetCamOffset.set(-physics.position.x * 0.2, 2.05 + speedNorm * 0.3, distBehind);
+          _targetLookOffset.set(0, 0.95, -8.0);
+        } else if (physics.phase === 'RAMP_CLIMB') {
+          // C-Ramp Climb & 170° Upside-Down Overhang Glide: Smoothly swing around the -X side of the C-Ramp
+          const p = physics.rampProgress;
+          const sideSwingX = -Math.sin(p * Math.PI * 0.86) * 14.5 - 2.2;
+          const backSwingZ = Math.cos(p * Math.PI) * 6.8;
+          const relY = Math.max(2.0 - physics.position.y, -1.1 + Math.cos(p * Math.PI) * 0.9);
 
-        const camY =
-          physics.phase === 'RAMP_CLIMB'
-            ? Math.max(2.0, physics.position.y - 1.1)
-            : Math.max(1.9, physics.position.y + 1.75 + speedNorm * 0.55);
+          _targetCamOffset.set(sideSwingX, relY, backSwingZ);
+          _targetLookOffset.set(
+            0,
+            physics.isUpsideDown ? -0.35 : 0.6,
+            p > 0.55 ? 3.5 : -2.0
+          );
+        } else {
+          // AIRBORNE, ROLLOUT & COMPLETED: Car flies/rolls in +Z down the landing runway. Offset is -Z behind the car.
+          const relMinY = Math.max(1.85 - physics.position.y, 1.85 + speedNorm * 0.4);
+          _targetCamOffset.set(-physics.position.x * 0.18, relMinY, -distBehind);
+          _targetLookOffset.set(0, 0.55, 6.5);
+        }
 
-        _camPosTarget.set(camX + shakeX, camY + shakeY, physics.position.z - distBehind);
-        _lookTarget.set(
-          physics.position.x * 0.85,
-          physics.position.y + 0.52,
-          physics.position.z + 5.0
-        );
+        // Damp only the relative offset vector, then add directly to physics.position for ZERO car jitter!
+        const dampRate = physics.phase === 'RAMP_CLIMB' ? 7.5 : 9.0;
+        _smoothedCamOffset.x = THREE.MathUtils.damp(_smoothedCamOffset.x, _targetCamOffset.x, dampRate, dt);
+        _smoothedCamOffset.y = THREE.MathUtils.damp(_smoothedCamOffset.y, _targetCamOffset.y, dampRate, dt);
+        _smoothedCamOffset.z = THREE.MathUtils.damp(_smoothedCamOffset.z, _targetCamOffset.z, dampRate, dt);
 
-        camera.position.lerp(_camPosTarget, Math.min(1, 11 * dt));
-        // Subtle horizon bank into high-G corners for visceral steering feel!
-        const bankAngle = -physics.lateralVelocityX * 0.004;
-        camera.up.set(Math.sin(bankAngle), Math.cos(bankAngle), 0).normalize();
+        _smoothedLookOffset.x = THREE.MathUtils.damp(_smoothedLookOffset.x, _targetLookOffset.x, dampRate, dt);
+        _smoothedLookOffset.y = THREE.MathUtils.damp(_smoothedLookOffset.y, _targetLookOffset.y, dampRate, dt);
+        _smoothedLookOffset.z = THREE.MathUtils.damp(_smoothedLookOffset.z, _targetLookOffset.z, dampRate, dt);
+
+        camera.position.copy(physics.position).add(_smoothedCamOffset);
+        _lookTarget.copy(physics.position).add(_smoothedLookOffset);
+        camera.up.set(0, 1, 0);
         camera.lookAt(_lookTarget);
       } else if (cameraMode === 'SHOWROOM') {
         const orbitAngle = currentTime * 0.00065;
-        const radius = 4.5;
-        _camPosTarget.set(
+        const radius = 4.6;
+        camera.position.set(
           physics.position.x + Math.sin(orbitAngle) * radius,
-          physics.position.y + 1.30,
+          physics.position.y + 1.35,
           physics.position.z + Math.cos(orbitAngle) * radius
         );
-        _lookTarget.copy(physics.position).add(new THREE.Vector3(0, 0.52, 0));
-
-        camera.position.lerp(_camPosTarget, Math.min(1, 8 * dt));
+        _lookTarget.copy(physics.position).add(new THREE.Vector3(0, 0.55, 0));
         camera.up.set(0, 1, 0);
         camera.lookAt(_lookTarget);
       } else if (cameraMode === 'COCKPIT') {
-        _carForward.set(0, 0, 1).applyEuler(physics.rotation);
-        _camPosTarget.copy(physics.position).add(new THREE.Vector3(shakeX * 0.4, 0.85 + shakeY * 0.4, 0.25));
-        _lookTarget.copy(_camPosTarget).add(_carForward.multiplyScalar(25));
-
-        camera.position.copy(_camPosTarget);
-        camera.up.set(0, 1, 0);
+        _carForward.set(0, 0, 1).applyQuaternion(physics.quaternion);
+        _carUp.set(0, 1, 0).applyQuaternion(physics.quaternion);
+        camera.position
+          .copy(physics.position)
+          .addScaledVector(_carUp, 0.88)
+          .addScaledVector(_carForward, 0.22);
+        _lookTarget.copy(camera.position).addScaledVector(_carForward, 25);
+        camera.up.copy(_carUp);
         camera.lookAt(_lookTarget);
       } else if (cameraMode === 'CINEMATIC') {
-        _camPosTarget.set(
-          physics.position.x - 14,
-          Math.max(2.6, physics.position.y * 0.85 + 2.0),
-          physics.position.z - 6
+        _targetCamOffset.set(
+          -18,
+          Math.max(3.0 - physics.position.y, 2.2),
+          physics.phase === 'ACCELERATION' || physics.phase === 'STAGING' ? -6 : 4
         );
-        _lookTarget.copy(physics.position).add(new THREE.Vector3(0, 0.7, 2));
-
-        camera.position.lerp(_camPosTarget, Math.min(1, 6 * dt));
+        _smoothedCamOffset.lerp(_targetCamOffset, Math.min(1, 7 * dt));
+        camera.position.copy(physics.position).add(_smoothedCamOffset);
+        _lookTarget.copy(physics.position).add(new THREE.Vector3(0, 0.6, 0));
         camera.up.set(0, 1, 0);
         camera.lookAt(_lookTarget);
       } else if (cameraMode === 'DRONE') {
-        _camPosTarget.set(
-          physics.position.x,
-          physics.position.y + 42,
-          physics.position.z - 24
-        );
-        _lookTarget.copy(physics.position).add(new THREE.Vector3(0, 0, 10));
-
-        camera.position.lerp(_camPosTarget, Math.min(1, 6 * dt));
+        const isHeadingNegZ = physics.phase === 'STAGING' || physics.phase === 'ACCELERATION';
+        _targetCamOffset.set(-10, 36, isHeadingNegZ ? 22 : -22);
+        _smoothedCamOffset.lerp(_targetCamOffset, Math.min(1, 6 * dt));
+        camera.position.copy(physics.position).add(_smoothedCamOffset);
+        _lookTarget.copy(physics.position);
         camera.up.set(0, 1, 0);
         camera.lookAt(_lookTarget);
       }
 
-      onTelemetryUpdate(physics.getTelemetry());
+      // Sync React HUD telemetry at ~25Hz (every 40ms) to keep mobile WebGL frame pacing 100% smooth
+      if (currentTime - lastHudSyncTime >= 40 || physics.phase === 'COMPLETED') {
+        lastHudSyncTime = currentTime;
+        onTelemetryUpdate(physics.getTelemetry());
+      }
+
       renderer.render(scene, camera);
     };
 
@@ -279,14 +299,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     const handleResize = () => {
       if (!container) return;
-      const width = container.clientWidth;
-      const height = container.clientHeight;
+      const width = Math.max(1, container.clientWidth);
+      const height = Math.max(1, container.clientHeight);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
     };
 
     window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
@@ -321,6 +342,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       }
       if (e.code === 'KeyR') {
         physics.reset();
+        _smoothedCamOffset.set(0, 2.05, 6.8);
+        _smoothedLookOffset.set(0, 0.9, -7.0);
       }
     };
 
@@ -353,12 +376,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       resetTeslaGame?: () => void;
       triggerTeslaBarrelRoll?: () => void;
     };
-    win.resetTeslaGame = () => physics.reset();
+    win.resetTeslaGame = () => {
+      physics.reset();
+      _smoothedCamOffset.set(0, 2.05, 6.8);
+      _smoothedLookOffset.set(0, 0.9, -7.0);
+    };
     win.triggerTeslaBarrelRoll = () => physics.triggerBarrelRoll();
 
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleResize);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       smokeSystem.dispose();
@@ -372,7 +400,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   return (
     <div
       ref={mountRef}
-      className="absolute inset-0 w-full h-full overflow-hidden select-none touch-none outline-none cursor-grab active:cursor-grabbing"
+      className="absolute inset-0 w-full h-full overflow-hidden select-none touch-none outline-none"
       tabIndex={0}
     />
   );
