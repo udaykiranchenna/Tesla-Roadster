@@ -1,11 +1,9 @@
 /**
- * 3D Tire Smoke & Cryo-Nitrogen Thruster Cloud Particle System
- * Generates volumetric billowing smoke trails from tire contact patches and thruster exhaust:
- * - High G-force cornering / lateral drift friction smoke
- * - Sudden 10,000-PSI Cold-Gas Thruster activation & 0.55s RWD launch burnout clouds
- * - 2.4G Inverted C-Ramp Wall-Climb & Upside-Down Overhang friction trails
- * - High-speed touchdown tire scrub smoke
- * Zero-GC pooled particle buffer with per-particle expansion, rotation, and alpha fade
+ * 3D Tire Smoke & Airborne Reaction Thruster Plume Particle System
+ * - Ground/Wall: High-G tire friction & RWD launch burnout smoke from tires
+ * - Flying (Airborne ONLY):
+ *   • Press LEFT Arrow (car moves LEFT) -> Thruster jet & cryo-smoke shoot out from the RIGHT side of the car!
+ *   • Press RIGHT Arrow (car moves RIGHT) -> Thruster jet & cryo-smoke shoot out from the LEFT side of the car!
  */
 import * as THREE from 'three';
 
@@ -35,7 +33,7 @@ export class TireSmokeParticleSystem {
   private pool: SmokeParticleData[] = [];
   private nextIdx: number = 0;
 
-  // Reusable world-space wheel offset helpers (Zero-GC)
+  // Reusable world-space vector helpers (Zero-GC)
   private readonly _wheelLocal = new THREE.Vector3();
   private readonly _wheelWorld = new THREE.Vector3();
   private readonly _normalOffset = new THREE.Vector3();
@@ -132,7 +130,6 @@ export class TireSmokeParticleSystem {
 
     ctx.clearRect(0, 0, 128, 128);
 
-    // Multi-lobe soft cloud puff for realistic tire smoke & cryo-nitrogen vapor
     const lobes = [
       { x: 64, y: 64, r: 54, a: 0.65 },
       { x: 50, y: 56, r: 38, a: 0.45 },
@@ -200,7 +197,7 @@ export class TireSmokeParticleSystem {
   }
 
   /**
-   * Spawns tire friction smoke and sudden thruster clouds around the Roadster in full 3D orientation
+   * Spawns airborne opposite-side reaction thruster plumes & ground tire smoke
    */
   public emitFromRoadster(params: {
     carPosition: THREE.Vector3;
@@ -209,9 +206,10 @@ export class TireSmokeParticleSystem {
     speedMph: number;
     lateralG: number;
     longitudinalG: number;
-    thrusterBurstIntensity: number; // 0..1 (1 on sudden thruster activation!)
+    thrusterBurstIntensity: number;
     isOnGroundOrWall: boolean;
-    touchdownBurst: number; // 0..1 on landing impact
+    touchdownBurst: number;
+    rollDir: number; // < 0 = Left Arrow pressed (move LEFT, thruster on RIGHT!), > 0 = Right Arrow pressed (move RIGHT, thruster on LEFT!)
   }) {
     const {
       carPosition,
@@ -223,12 +221,56 @@ export class TireSmokeParticleSystem {
       thrusterBurstIntensity,
       isOnGroundOrWall,
       touchdownBurst,
+      rollDir,
     } = params;
 
-    //Rear exhaust vector in world space (local -Z of the car)
+    // Rear exhaust vector in world space (local -Z of the car)
     this._exhaustDir.set(0, 0, -1).applyQuaternion(carQuaternion);
 
-    // 1. High G-Force Cornering / Drift / C-Ramp Wall-Climb Friction Tire Smoke
+    // =========================================================================
+    // 1. AIRBORNE-ONLY OPPOSITE-SIDE REACTION THRUSTER EFFECT
+    //    When flying in +Z (camera behind looking toward +Z):
+    //    - Screen LEFT is World +X, Screen RIGHT is World -X.
+    //    - When player presses LEFT (rollDir < 0):
+    //      Car moves to Screen LEFT (+X), and thruster jet fires on Screen RIGHT (-X side of car, shooting toward -X)!
+    //    - When player presses RIGHT (rollDir > 0):
+    //      Car moves to Screen RIGHT (-X), and thruster jet fires on Screen LEFT (+X side of car, shooting toward +X)!
+    // =========================================================================
+    if (!isOnGroundOrWall && Math.abs(rollDir) > 0.05) {
+      // rollDir < 0 (Left pressed)  -> worldOutwardX = -1 (Screen RIGHT side of car!)
+      // rollDir > 0 (Right pressed) -> worldOutwardX = +1 (Screen LEFT side of car!)
+      const worldOutwardX = rollDir < 0 ? -1 : 1;
+
+      const nozzleZOffsets = [-0.65, 0.85];
+      nozzleZOffsets.forEach((zOff) => {
+        for (let i = 0; i < 3; i++) {
+          const spawnX = carPosition.x + worldOutwardX * (1.05 + Math.random() * 0.15);
+          const spawnY = carPosition.y + 0.35 + (Math.random() - 0.5) * 0.16;
+          const spawnZ = carPosition.z + zOff + (Math.random() - 0.5) * 0.22;
+
+          const jetSpeed = 10.5 + Math.random() * 6.5;
+          this.spawnPuff(
+            spawnX,
+            spawnY,
+            spawnZ,
+            worldOutwardX * jetSpeed,
+            -1.2 + (Math.random() - 0.5) * 1.6,
+            (Math.random() - 0.5) * 2.5,
+            0.85,
+            3.8,
+            0.42 + Math.random() * 0.22,
+            0.78,
+            0.82,
+            0.96,
+            1.0 // Bright icy-cyan/white SpaceX cold-gas thruster jet
+          );
+        }
+      });
+    }
+
+    // =========================================================================
+    // 2. GROUND / RAMP TIRE FRICTION SMOKE (Only when tires are on ground/wall)
+    // =========================================================================
     const highGCornering = isOnGroundOrWall && (lateralG > 0.65 || longitudinalG > 1.85) && speedMph > 15;
     const isBurnoutLaunch = isOnGroundOrWall && speedMph < 95 && longitudinalG > 1.6;
 
@@ -236,14 +278,14 @@ export class TireSmokeParticleSystem {
       const tireOffsets =
         lateralG > 0.8 || touchdownBurst > 0.1
           ? [
-              { x: 0.94, y: 0.06, z: -1.30 },  // Rear Left
-              { x: -0.94, y: 0.06, z: -1.30 }, // Rear Right
-              { x: 0.91, y: 0.06, z: 1.35 },   // Front Left
-              { x: -0.91, y: 0.06, z: 1.35 },  // Front Right
+              { x: 0.94, y: 0.06, z: -1.30 },
+              { x: -0.94, y: 0.06, z: -1.30 },
+              { x: 0.91, y: 0.06, z: 1.35 },
+              { x: -0.91, y: 0.06, z: 1.35 },
             ]
           : [
-              { x: 0.94, y: 0.06, z: -1.30 },  // Rear Left RWD
-              { x: -0.94, y: 0.06, z: -1.30 }, // Rear Right RWD
+              { x: 0.94, y: 0.06, z: -1.30 },
+              { x: -0.94, y: 0.06, z: -1.30 },
             ];
 
       const intensity = Math.min(
@@ -266,9 +308,8 @@ export class TireSmokeParticleSystem {
           );
           this._wheelWorld.copy(this._wheelLocal).applyQuaternion(carQuaternion).add(carPosition);
 
-          // Billow outward along surface normal & rear exhaust direction
-          this._normalOffset.copy(surfaceNormal).multiplyScalar(1.1 + Math.random() * 1.6);
-          const lateralSpread = (off.x > 0 ? 1 : -1) * (1.2 + lateralG * 1.5 + Math.random() * 1.4);
+          this._normalOffset.copy(surfaceNormal).multiplyScalar(1.1 + Math.random() * 1.5);
+          const lateralSpread = (off.x > 0 ? 1 : -1) * (1.1 + lateralG * 1.3 + Math.random() * 1.2);
 
           this.spawnPuff(
             this._wheelWorld.x,
@@ -289,13 +330,13 @@ export class TireSmokeParticleSystem {
       });
     }
 
-    // 2. Sudden 10,000-PSI Cold-Gas Thruster Activation & Cryo-Nitrogen Ground Plume (Screenshot 4 & 8!)
+    // 3. Rear Cold-Gas Thruster Boost Plume (Straight behind car)
     if (thrusterBurstIntensity > 0.05) {
-      const burstCount = thrusterBurstIntensity > 0.65 ? 5 : 3;
+      const burstCount = thrusterBurstIntensity > 0.65 ? 4 : 2;
       for (let i = 0; i < burstCount; i++) {
         const side = i % 2 === 0 ? 1 : -1;
         this._wheelLocal.set(
-          side * (0.35 + Math.random() * 0.55),
+          side * (0.35 + Math.random() * 0.45),
           0.25 + (Math.random() - 0.5) * 0.15,
           -2.25 - Math.random() * 0.4
         );
@@ -306,16 +347,16 @@ export class TireSmokeParticleSystem {
           this._wheelWorld.x,
           this._wheelWorld.y,
           this._wheelWorld.z,
-          side * (2.0 + Math.random() * 3.2 * thrusterBurstIntensity) + this._exhaustDir.x * exhaustSpeed,
-          this._exhaustDir.y * exhaustSpeed + (Math.random() - 0.4) * 2.0,
+          this._exhaustDir.x * exhaustSpeed,
+          this._exhaustDir.y * exhaustSpeed + (Math.random() - 0.4) * 1.8,
           this._exhaustDir.z * exhaustSpeed,
           0.75 + thrusterBurstIntensity * 0.45,
-          4.2 + thrusterBurstIntensity * 2.8,
-          0.55 + Math.random() * 0.4,
+          4.0 + thrusterBurstIntensity * 2.6,
+          0.52 + Math.random() * 0.35,
           Math.min(0.75, 0.35 + thrusterBurstIntensity * 0.4),
           0.92,
           0.97,
-          1.0 // Crisp icy-white cryo nitrogen cloud tint
+          1.0
         );
       }
     }
@@ -338,9 +379,8 @@ export class TireSmokeParticleSystem {
       }
 
       anyActive = true;
-      const t = p.age / p.maxLife; // 0..1
+      const t = p.age / p.maxLife;
 
-      // Exponential air drag on smoke puff velocity + gentle upward thermal buoyancy
       const drag = Math.exp(-2.6 * dt);
       p.vx *= drag;
       p.vz *= drag;
@@ -350,11 +390,9 @@ export class TireSmokeParticleSystem {
       this.positions[i * 3 + 1] += p.vy * dt;
       this.positions[i * 3 + 2] += p.vz * dt;
 
-      // Expand size rapidly at first, then billow
       const sizeCurve = 1 - Math.pow(1 - t, 2.2);
       this.sizes[i] = THREE.MathUtils.lerp(p.startSize, p.endSize, sizeCurve);
 
-      // Smooth fade-in and fade-out envelope
       const fadeIn = Math.min(1.0, t * 6.0);
       const fadeOut = Math.pow(1.0 - t, 1.6);
       this.alphas[i] = p.baseAlpha * fadeIn * fadeOut;

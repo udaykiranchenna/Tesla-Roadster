@@ -1,6 +1,6 @@
 {
   "name": "Tesla Roadster: SpaceX Loop & Long Jump Challenge",
-  "description": "Drive the real Tesla Roadster with SpaceX thrusters up the steep curved wall ramp, launch into high-altitude flight, and compete for the daily $10 longest jump prize.",
+  "description": "Drive the new 3D Tesla Roadster with SpaceX cold-gas thrusters up the inverted C-ramp, glide upside-down, and flip upright for the longest runway jump.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

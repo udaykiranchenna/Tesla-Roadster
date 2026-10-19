@@ -13,7 +13,6 @@ import { TeslaRoadsterModel } from './roadsterModel';
 import { TrackBuilder } from './trackBuilder';
 import { PhysicsEngine, PlayerInput, Telemetry, LandingGrade } from './physicsEngine';
 import { TireSmokeParticleSystem } from './particleSystem';
-import { dailyChallengeManager } from './dailyChallenge';
 
 export type CameraMode = 'CHASE' | 'SHOWROOM' | 'COCKPIT' | 'CINEMATIC' | 'DRONE';
 
@@ -23,8 +22,6 @@ interface GameCanvasProps {
     distance: number;
     grade: LandingGrade;
     speed: number;
-    rank: number;
-    isDailyWinner: boolean;
   }) => void;
   activeColor: string;
   hasSpaceXPackage: boolean;
@@ -160,11 +157,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     _smoothedLookOffset.set(0, 0.9, -7.0);
 
     physics.setOnScore((distance, grade, speed) => {
-      const result = dailyChallengeManager.submitScore(distance, grade, speed);
-      if (result.isDailyWinner || result.rank <= 3) {
+      if (grade === 'smooth' || grade === 'solid') {
         confetti({
-          particleCount: 100,
-          spread: 75,
+          particleCount: 90,
+          spread: 70,
           origin: { y: 0.6 },
         });
       }
@@ -172,8 +168,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         distance,
         grade,
         speed,
-        rank: result.rank,
-        isDailyWinner: result.isDailyWinner,
       });
     });
 

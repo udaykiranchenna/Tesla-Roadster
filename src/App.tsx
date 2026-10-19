@@ -6,13 +6,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameCanvas, CameraMode } from './game/GameCanvas';
 import { HUD } from './components/HUD';
 import { BottomControlDock } from './components/BottomControlDock';
-import { DailyPrizeModal } from './components/DailyPrizeModal';
-import { LeaderboardModal } from './components/LeaderboardModal';
 import { HowToPlayModal } from './components/HowToPlayModal';
 import { JumpResultModal } from './components/JumpResultModal';
 import { Telemetry, LandingGrade, PlayerInput } from './game/physicsEngine';
 import { soundEngine } from './game/soundEngine';
-import { dailyChallengeManager } from './game/dailyChallenge';
+
+const BEST_JUMP_STORAGE_KEY = 'tesla_roadster_best_jump_m';
 
 export default function App() {
   // Telemetry state
@@ -50,28 +49,33 @@ export default function App() {
   const [hasSpaceXPackage, setHasSpaceXPackage] = useState<boolean>(true);
   const [cameraMode, setCameraMode] = useState<CameraMode>('CHASE');
   const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [playerTag, setPlayerTag] = useState<string>(dailyChallengeManager.getPlayerTag());
 
-  // Top-Bar Zen View / Studio Drawer State (defaults to false = unobstructed Zen View for mobile thumb controls!)
+  // Personal Best Distance
+  const [bestDistance, setBestDistance] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(BEST_JUMP_STORAGE_KEY);
+      return saved ? parseFloat(saved) || 0 : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  // Top-Bar Zen View / Studio Drawer State
   const [isStudioOpen, setIsStudioOpen] = useState<boolean>(false);
 
   // Modals
-  const [isPrizeModalOpen, setIsPrizeModalOpen] = useState<boolean>(false);
-  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isResultModalOpen, setIsResultModalOpen] = useState<boolean>(false);
   const [lastResult, setLastResult] = useState<{
     distance: number;
     grade: LandingGrade | null;
     speed: number;
-    rank: number;
-    isDailyWinner: boolean;
+    isNewBest: boolean;
   }>({
     distance: 0,
     grade: null,
     speed: 0,
-    rank: 1,
-    isDailyWinner: false,
+    isNewBest: false,
   });
 
   // Input State Ref for 60fps responsiveness without React re-renders
@@ -88,26 +92,6 @@ export default function App() {
     analogX: 0,
     analogY: 0,
   });
-
-  // Tournament Reset Countdown (updates every second)
-  const [timeRemainingStr, setTimeRemainingStr] = useState<string>('00:00:00');
-
-  useEffect(() => {
-    const updateCountdown = () => {
-      const info = dailyChallengeManager.getTournamentInfo();
-      const totalSec = info.timeRemainingSeconds;
-      const hours = Math.floor(totalSec / 3600);
-      const mins = Math.floor((totalSec % 3600) / 60);
-      const secs = totalSec % 60;
-      setTimeRemainingStr(
-        `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-      );
-    };
-
-    updateCountdown();
-    const interval = setInterval(updateCountdown, 1000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Initialize audio on first user touch/click
   useEffect(() => {
@@ -135,17 +119,29 @@ export default function App() {
   }, []);
 
   const handleJumpCompleted = useCallback(
-    (result: {
-      distance: number;
-      grade: LandingGrade;
-      speed: number;
-      rank: number;
-      isDailyWinner: boolean;
-    }) => {
-      setLastResult(result);
+    (result: { distance: number; grade: LandingGrade; speed: number }) => {
+      setBestDistance((prevBest) => {
+        const isNewBest = result.distance > prevBest;
+        const nextBest = isNewBest ? result.distance : prevBest;
+        if (isNewBest) {
+          try {
+            localStorage.setItem(BEST_JUMP_STORAGE_KEY, nextBest.toFixed(1));
+          } catch {
+            // Ignore storage errors
+          }
+        }
+        setLastResult({
+          distance: result.distance,
+          grade: result.grade,
+          speed: result.speed,
+          isNewBest,
+        });
+        return nextBest;
+      });
+
       setTimeout(() => {
         setIsResultModalOpen(true);
-      }, 1200);
+      }, 1000);
     },
     []
   );
@@ -163,20 +159,17 @@ export default function App() {
         inputStateRef={inputStateRef}
       />
 
-      {/* Mobile-First Heads-Up Telemetry, Virtual Analog Thumbstick & Right Pedals */}
+      {/* Mobile-First 2-Hands Hardware Controller Deck & Telemetry HUD */}
       <HUD
         telemetry={telemetry}
-        timeRemainingStr={timeRemainingStr}
+        bestDistance={bestDistance}
         isStudioOpen={isStudioOpen}
         onToggleStudio={() => setIsStudioOpen((prev) => !prev)}
-        onOpenPrizeModal={() => setIsPrizeModalOpen(true)}
-        onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
-        onOpenGuide={() => setIsGuideOpen(true)}
         inputStateRef={inputStateRef}
         onReset={handleResetRun}
       />
 
-      {/* Top-Bar Toggled Roadster Studio & Camera Drawer (Completely unmounted in Zen View!) */}
+      {/* Top-Bar Toggled Roadster Studio & Camera Drawer */}
       <BottomControlDock
         isOpen={isStudioOpen}
         onClose={() => setIsStudioOpen(false)}
@@ -189,26 +182,10 @@ export default function App() {
         onReset={handleResetRun}
         isMuted={isMuted}
         onToggleMute={handleToggleMute}
-        onOpenPrizeModal={() => setIsPrizeModalOpen(true)}
-        onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
         onOpenGuide={() => setIsGuideOpen(true)}
       />
 
       {/* Modals */}
-      <DailyPrizeModal
-        isOpen={isPrizeModalOpen}
-        onClose={() => setIsPrizeModalOpen(false)}
-        playerTag={playerTag}
-        onPlayerTagChange={setPlayerTag}
-        timeRemainingStr={timeRemainingStr}
-      />
-
-      <LeaderboardModal
-        isOpen={isLeaderboardOpen}
-        onClose={() => setIsLeaderboardOpen(false)}
-        timeRemainingStr={timeRemainingStr}
-      />
-
       <HowToPlayModal
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
@@ -218,19 +195,15 @@ export default function App() {
         isOpen={isResultModalOpen}
         onClose={() => setIsResultModalOpen(false)}
         distance={lastResult.distance}
+        bestDistance={bestDistance}
+        isNewBest={lastResult.isNewBest}
         grade={lastResult.grade}
         landedOffRoad={telemetry.landedOffRoad}
         speed={lastResult.speed}
-        rank={lastResult.rank}
-        isDailyWinner={lastResult.isDailyWinner}
         onJumpAgain={handleResetRun}
-        onOpenLeaderboard={() => {
+        onOpenStudio={() => {
           setIsResultModalOpen(false);
-          setIsLeaderboardOpen(true);
-        }}
-        onOpenPrizeModal={() => {
-          setIsResultModalOpen(false);
-          setIsPrizeModalOpen(true);
+          setIsStudioOpen(true);
         }}
       />
     </div>

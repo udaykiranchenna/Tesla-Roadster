@@ -378,6 +378,7 @@ export class PhysicsEngine {
         thrusterBurstIntensity: this.thrusterBurstIntensity,
         isOnGroundOrWall,
         touchdownBurst: this.touchdownSmokeBurst,
+        rollDir: thrusterVisuals.rollDir,
       });
       this.smokeSystem.update(delta);
     }
@@ -405,6 +406,7 @@ export class PhysicsEngine {
         thrusterBurstIntensity: this.thrusterBurstIntensity,
         isOnGroundOrWall: true,
         touchdownBurst: 0,
+        rollDir: 0,
       });
     }
 
@@ -492,21 +494,21 @@ export class PhysicsEngine {
       (Math.abs(steerInput) > 0.15 ? 0.75 * Math.abs(steerInput) * speedFactor : 0);
     this.chassisRollRad = -steerInput * Math.min(0.065, this.lateralG * 0.028);
 
-    if (Math.abs(steerInput) > 0.2 && this.hasSpaceXPackage) {
-      visuals.rollDir = steerInput > 0 ? 1 : -1;
-    }
+    // Side thrusters are OFF on the ground (only active when flying!)
+    visuals.rollDir = 0;
 
     this.sDistance += this.forwardSpeed * dt;
     const pt = this.track.getPointAtArcLength(Math.min(this.sDistance, this.track.rampSpecs.approachLength));
 
-    // Heading in -Z, so driver's right (+steerInput) corresponds to -X in world coordinates
-    this.position.set(-this.lateralOffsetX, 0.02, pt.position.z);
+    // Heading in -Z (camera at +Z looking toward -Z):
+    // Screen-LEFT is -X (steerInput < 0) and Screen-RIGHT is +X (steerInput > 0)!
+    this.position.set(this.lateralOffsetX, 0.02, pt.position.z);
     this.velocity.copy(pt.forward).multiplyScalar(this.forwardSpeed);
     this.forwardDir.copy(pt.forward);
     this.upDir.copy(pt.up);
 
     // Subtle yaw slip angle when carving left/right
-    const yawSlip = -this.lateralVelocityX * 0.008;
+    const yawSlip = this.lateralVelocityX * 0.008;
     this._zAxis.set(Math.sin(yawSlip), 0, -Math.cos(yawSlip)).normalize();
     this._yAxis.set(0, 1, 0);
     this._xAxis.crossVectors(this._yAxis, this._zAxis).normalize();
@@ -552,6 +554,7 @@ export class PhysicsEngine {
     // Player can steer across the C-ramp width while climbing!
     const steerInput = this.getEffectiveSteerX(input);
     this.steerAngleRad = -steerInput * 0.28;
+    visuals.rollDir = 0; // Side thrusters OFF on the ramp
     const targetLatVel = steerInput * 8.5;
     this.lateralVelocityX = THREE.MathUtils.damp(this.lateralVelocityX, targetLatVel, 8, dt);
     this.lateralOffsetX = THREE.MathUtils.clamp(
@@ -586,13 +589,13 @@ export class PhysicsEngine {
       const boostBonusZ = input.boost && this.hasSpaceXPackage ? 18 : 6;
       const boostBonusY = input.boost && this.hasSpaceXPackage ? 8 : 3;
 
-      // Preserve lateral steering momentum + natural high-altitude drift vector so the car
-      // does NOT fly in a locked straight line — the player MUST steer and flip upright to land on the road!
-      const driftSign = Math.abs(this.position.x) > 0.4 ? Math.sign(this.position.x) : Math.random() > 0.5 ? 1 : -1;
-      const initialDriftVx = -this.lateralVelocityX * 0.9 + this.position.x * 1.1 + driftSign * 3.6;
+      // In +Z flight, Screen-Left is +X and Screen-Right is -X.
+      // Flip X on launch transition so the car stays on the same left/right side of the screen!
+      this.position.x = -this.lateralOffsetX;
+      const initialVx = -this.lateralVelocityX * 0.5;
 
       this.velocity.set(
-        initialDriftVx,
+        initialVx,
         pt.forward.y * launchSpeed + boostBonusY,
         pt.forward.z * launchSpeed + boostBonusZ
       );
@@ -603,8 +606,8 @@ export class PhysicsEngine {
       this.airPitchRad = -overhangNoseUpRad;
       this.airYawRad = Math.atan2(this.velocity.x, this.velocity.z);
       this.cumulativeRollRad = Math.PI; // Starts 180° UPSIDE-DOWN at the lip!
-      this.rollAngularVel = steerInput !== 0 ? steerInput * 2.2 : 0.45; // Slight initial roll momentum
-      this.assistTargetRollRad = null; // Full manual control unless player steers or taps Flip [E]!
+      this.rollAngularVel = steerInput !== 0 ? steerInput * 2.2 : 0.45;
+      this.assistTargetRollRad = null;
       this.barrelRollsCount = 0;
       this.isUpsideDown = true;
 
@@ -614,7 +617,7 @@ export class PhysicsEngine {
 
     // Keep tires in tight contact with the curved C-ramp and upside-down overhang ceiling!
     this.position.copy(pt.position).addScaledVector(pt.up, 0.02);
-    this.position.x = -this.lateralOffsetX;
+    this.position.x = this.lateralOffsetX;
     this.velocity.copy(pt.forward).multiplyScalar(this.forwardSpeed);
 
     this._xAxis.crossVectors(pt.up, pt.forward).normalize();
@@ -688,15 +691,18 @@ export class PhysicsEngine {
     // ============================================================================
     // 1. MANUAL LATERAL ROAD STEERING (X-Axis Velocity & Runway Alignment)
     // ============================================================================
-    // In +Z flight, +X is to the left of the runway and -X is to the right of the runway!
-    // Moving thumbstick right (ctrlX > 0) thrusts toward -X (right side of road);
-    // Moving thumbstick left (ctrlX < 0) thrusts toward +X (left side of road).
-    const lateralThrustAccel = -ctrlX * (this.hasSpaceXPackage ? 28.0 : 16.0);
-    // Bank angle also curves the aerodynamic flight path slightly
-    const bankCurveAccel = Math.sin(this.cumulativeRollRad) * 3.2;
-    this.velocity.x += (lateralThrustAccel + bankCurveAccel) * dt;
-    // Gentle lateral air drag so steering feels crisp and controllable
-    this.velocity.x *= Math.exp(-1.35 * dt);
+    // In +Z flight (camera looking toward +Z):
+    // - Screen LEFT is World +X
+    // - Screen RIGHT is World -X
+    // Pressing LEFT arrow (ctrlX < 0) directly drives velocity.x toward +X (Screen LEFT)!
+    // Pressing RIGHT arrow (ctrlX > 0) directly drives velocity.x toward -X (Screen RIGHT)!
+    const targetVx = -ctrlX * (this.hasSpaceXPackage ? 24.0 : 16.0);
+    this.velocity.x = THREE.MathUtils.damp(
+      this.velocity.x,
+      targetVx,
+      Math.abs(ctrlX) > 0.05 ? 8.5 : 3.5,
+      dt
+    );
     this.lateralVelocityX = this.velocity.x;
     this.lateralG = Math.abs(ctrlX) * 1.1;
 
@@ -872,6 +878,7 @@ export class PhysicsEngine {
     // Steering & High-G Drift Smoke during high-speed rollout along the +Z runway!
     const steerInput = this.getEffectiveSteerX(input);
     this.steerAngleRad = -steerInput * 0.38;
+    visuals.rollDir = 0; // Side thrusters OFF on the ground
     const targetLat = -steerInput * Math.min(16, this.velocity.z * 0.20);
     this.lateralVelocityX = THREE.MathUtils.damp(this.lateralVelocityX, targetLat, 8, dt);
     this.position.x = THREE.MathUtils.clamp(this.position.x + this.lateralVelocityX * dt, -38, 38);
